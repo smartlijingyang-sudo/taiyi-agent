@@ -22,6 +22,24 @@ import pytest
 from hmr.error import HmrError
 from hmr.service import EVENT_CHANGE, EVENT_RELOAD, Hmr
 
+
+def _make_failing_awatch(exc: BaseException):
+    """Return an ``awatch`` async-generator stub that raises ``exc`` immediately.
+
+    ``watchfiles.awatch`` is an async generator consumed by the
+    watcher via ``async for``; the stub must be a generator function
+    (the ``if False: yield`` is the standard marker for that — see
+    https://docs.python.org/3/reference/expressions.html#yield-expressions).
+    Tests monkeypatch ``hmr.service.awatch`` with this stub to simulate
+    watcher failures deterministically.
+    """
+    async def _awatch(*args, **kwargs):
+        if False:  # pragma: no cover — async-generator marker
+            yield
+        raise exc
+
+    return _awatch
+
 # ---------------------------------------------------------------------------
 # register_config
 # ---------------------------------------------------------------------------
@@ -66,6 +84,163 @@ class TestRegisterConfig:
         dispose = await hmr.register_config("rel.yml")
         assert callable(dispose)
         await dispose()
+
+    async def test_register_config_relative_via_base(self, make_ctx, tmp_path: Path):
+        """An absolute path through ``ctx.baseUrl``-derived ``base_dir`` registers cleanly."""
+        target = tmp_path / "abs.yml"
+        target.write_text("v")
+        ctx = make_ctx()
+        ctx.baseUrl = f"file://{tmp_path}"
+        hmr = Hmr(ctx, base=".")
+        dispose = await hmr.register_config(str(target))
+        assert callable(dispose)
+        await dispose()
+
+    async def test_register_config_watcher_timeout(self, make_ctx, tmp_path: Path, monkeypatch):
+        """If the watcher fails to signal ready, ``HmrError`` is raised."""
+        from hmr import service as service_mod
+
+        target = tmp_path / "timeo.yml"
+        target.write_text("x")
+        ctx = make_ctx()
+        hmr = Hmr(ctx)
+
+        # The watcher relies on ``_set_future_if_pending`` via
+        # ``loop.call_soon`` to resolve ``ready_event``. Monkeypatching
+        # both the helper and ``_run_watcher`` ensures the event is
+        # never resolved, so ``register_config`` reaches its timeout.
+        monkeypatch.setattr(
+            service_mod, "_set_future_if_pending", lambda fut, val: None
+        )
+        original = service_mod.Hmr._run_watcher
+
+        async def _never_ready(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(service_mod.Hmr, "_run_watcher", _never_ready)
+        try:
+            with pytest.raises(HmrError, match="failed to start"):
+                await hmr.register_config(str(target))
+        finally:
+            monkeypatch.setattr(service_mod.Hmr, "_run_watcher", original)
+
+    async def test_register_config_watcher_exception(self, make_ctx, tmp_path: Path, monkeypatch):
+        """If the watcher raises, ``HmrError`` wraps the error."""
+        from hmr import service as service_mod
+
+        target = tmp_path / "exc.yml"
+        target.write_text("x")
+        ctx = make_ctx()
+        hmr = Hmr(ctx)
+
+        class _CustomError(Exception):
+            pass
+
+        async def _patched_run_watcher(self, registration, watch_root, depth, refresh):
+            await asyncio.sleep(0.05)  # let register_config reach wait_for
+            if not registration.ready_event.done():
+                registration.ready_event.set_exception(_CustomError("explode"))
+            raise _CustomError("explode")
+
+        monkeypatch.setattr(service_mod.Hmr, "_run_watcher", _patched_run_watcher)
+        with pytest.raises(HmrError) as info:
+            await hmr.register_config(str(target))
+        assert "failed to start" in str(info.value)
+
+    async def test_register_config_consecutive_changes(self, make_ctx, tmp_path: Path):
+        """``register_config`` events keep firing across consecutive debounce windows."""
+        target = tmp_path / "consec.yml"
+        target.write_text("c0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+        events: list[tuple[str, str]] = []
+        ctx.on(EVENT_CHANGE, lambda _c, fn, ct: events.append((fn, ct)))
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        target.write_text("c1")
+        for _ in range(300):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        assert events
+        # Second change
+        target.write_text("c2")
+        for _ in range(300):
+            if len(events) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(events) >= 2
+
+    async def test_register_config_read_text_file_not_found(
+        self, make_ctx, tmp_path: Path, monkeypatch
+    ):
+        """``read_text`` raising ``FileNotFoundError`` is handled gracefully."""
+        from hmr import service as service_mod
+
+        target = tmp_path / "rfnf.yml"
+        target.write_text("x")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+
+        real_read_text = service_mod.Path.read_text
+
+        def _raise_fnf(self, *args, **kwargs):
+            raise FileNotFoundError(self)
+
+        monkeypatch.setattr(service_mod.Path, "read_text", _raise_fnf)
+        try:
+            await hmr.register_config(str(target))
+            # Modify the file to trigger the watch loop. The read will
+            # raise FileNotFoundError and be caught.
+            target.write_text("y")
+            await asyncio.sleep(0.2)
+            # The watcher stayed alive.
+            assert len(hmr._configs) == 1
+        finally:
+            monkeypatch.setattr(service_mod.Path, "read_text", real_read_text)
+
+    async def test_watcher_internal_exception(self, make_ctx, tmp_path: Path, monkeypatch, caplog):
+        """An exception in ``awatch`` is logged and surfaces via ``HmrError``."""
+        import logging
+
+        from hmr import service as service_mod
+
+        target = tmp_path / "watch_exc.yml"
+        target.write_text("x")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+
+        monkeypatch.setattr(service_mod, "awatch", _make_failing_awatch(RuntimeError("awatch boom")))
+        with caplog.at_level(logging.WARNING, logger="hmr.service"):
+            with pytest.raises(HmrError):
+                await hmr.register_config(str(target))
+            await asyncio.sleep(0.1)
+        assert any("watcher" in r.message.lower() for r in caplog.records)
+
+    async def test_watcher_exception_after_ready_resolved(
+        self, make_ctx, tmp_path: Path, monkeypatch, caplog
+    ):
+        """If the watcher raises after ``ready_event`` resolves, the inner branch is logged + re-raised."""
+        import logging
+
+        from hmr import service as service_mod
+
+        target = tmp_path / "after_ready.yml"
+        target.write_text("x")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+
+        monkeypatch.setattr(
+            service_mod, "awatch", _make_failing_awatch(RuntimeError("post-ready boom"))
+        )
+        with caplog.at_level(logging.WARNING, logger="hmr.service"):
+            with pytest.raises(HmrError):
+                await hmr.register_config(str(target))
+            for _ in range(100):
+                if any("watcher" in r.message.lower() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
+        assert any("watcher" in r.message.lower() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +334,105 @@ class TestChangeEvent:
         # The last event corresponds to the final write.
         assert events[-1][1].strip() == "4"
 
+    async def test_file_unlink_event_does_not_crash(self, make_ctx, tmp_path: Path):
+        """Deleting a watched file does not crash the watcher; ``change`` is empty content."""
+        target = tmp_path / "gone.yml"
+        target.write_text("g0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        target.unlink()
+        # Wait a bit; watcher should still be alive and not crash.
+        await asyncio.sleep(0.3)
+        assert len(hmr._configs) == 1
+
+    async def test_file_read_os_error_handled(self, make_ctx, tmp_path: Path, monkeypatch):
+        """``OSError`` from ``read_text`` is logged; watcher stays alive."""
+        from hmr import service as service_mod
+
+        target = tmp_path / "oserr.yml"
+        target.write_text("oe0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+
+        real_read_text = service_mod.Path.read_text
+
+        def _boom(self, *args, **kwargs):
+            err = OSError("io")
+            err.errno = 5
+            raise err
+
+        monkeypatch.setattr(service_mod.Path, "read_text", _boom)
+        try:
+            await hmr.register_config(str(target))
+            # Modify the file via the OS directly (bypassing read_text).
+            target.write_text("oe1")
+            await asyncio.sleep(0.3)
+            # Watcher stayed alive.
+            assert len(hmr._configs) == 1
+        finally:
+            monkeypatch.setattr(service_mod.Path, "read_text", real_read_text)
+
+    async def test_multiple_changes_rotate_futures(self, make_ctx, tmp_path: Path):
+        """Each change rotates ``change_event`` and ``reload_event``."""
+        target = tmp_path / "rot.yml"
+        target.write_text("r0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+        reload_events: list[str] = []
+
+        def _on_reload(_ctx, filename):
+            reload_events.append(filename)
+
+        ctx.on(EVENT_RELOAD, _on_reload)
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        target.write_text("r1")
+        for _ in range(300):
+            if reload_events:
+                break
+            await asyncio.sleep(0.01)
+        assert len(reload_events) >= 1
+        # Now trigger a second change.
+        target.write_text("r2")
+        for _ in range(300):
+            if len(reload_events) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(reload_events) >= 2
+
+    async def test_rapid_changes_cancel_in_flight_debounce(self, make_ctx, tmp_path: Path):
+        """A new change cancels the in-flight debounce task before scheduling a new one."""
+        target = tmp_path / "rapid.yml"
+        target.write_text("r0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=500)  # longer debounce so we can interrupt it
+        events: list[tuple[str, str]] = []
+        ctx.on(EVENT_CHANGE, lambda _c, fn, ct: events.append((fn, ct)))
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        # First change (starts a debounce).
+        target.write_text("r1\n")
+        # Wait for the debounce_task to be created.
+        registration = next(iter(hmr._configs.values()))
+        for _ in range(200):
+            if registration.debounce_task is not None and not registration.debounce_task.done():
+                break
+            await asyncio.sleep(0.01)
+        assert registration.debounce_task is not None
+        assert not registration.debounce_task.done()
+        # Second change should cancel the in-flight debounce.
+        target.write_text("r2\n")
+        # Wait for the new debounce to fire (500ms + buffer).
+        for _ in range(200):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        # The events should reflect the final state.
+        assert events
+        assert events[-1][1] == "r2\n"
+
 
 # ---------------------------------------------------------------------------
 # hmr/reload
@@ -192,6 +466,75 @@ class TestReloadEvent:
             await asyncio.sleep(0.01)
         assert reloads, "hmr/reload never fired"
         assert reloads[0] == str(target)
+
+    async def test_reload_event_with_debounce_80ms(self, make_ctx, tmp_path: Path):
+        """Reload event timing: emits shortly after the debounce window closes."""
+        target = tmp_path / "timing.yml"
+        target.write_text("t0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=80)
+        seen: list[str] = []
+
+        def _on_reload(_ctx, filename):
+            seen.append(filename)
+
+        ctx.on(EVENT_RELOAD, _on_reload)
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        target.write_text("t1")
+        for _ in range(300):
+            if seen:
+                break
+            await asyncio.sleep(0.01)
+        assert seen == [str(target)]
+
+    async def test_reload_event_rotates_when_already_done(self, make_ctx, tmp_path: Path):
+        """A second change rotates the per-registration ``reload_event`` future."""
+        target = tmp_path / "reload_rot.yml"
+        target.write_text("r0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=50)
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        registration = next(iter(hmr._configs.values()))
+        original_reload = registration.reload_event
+        # First change: resolves the reload future.
+        target.write_text("r1")
+        for _ in range(300):
+            if original_reload.done():
+                break
+            await asyncio.sleep(0.01)
+        assert original_reload.done()
+        # Second change: should rotate to a new future.
+        target.write_text("r2")
+        for _ in range(300):
+            if registration.reload_event is not original_reload and registration.reload_event.done():
+                break
+            await asyncio.sleep(0.01)
+        assert registration.reload_event is not original_reload
+        assert registration.reload_event.done()
+
+    async def test_reload_event_debounce_creates_new_future(self, make_ctx, tmp_path: Path):
+        """When ``reload_event`` is already done at debounce time, a new future is created and resolved."""
+        target = tmp_path / "rn.yml"
+        target.write_text("r0")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=80)
+        await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        registration = next(iter(hmr._configs.values()))
+        # Pre-resolve the reload_event to put it in "done" state.
+        registration.reload_event.set_result("/already/done")
+        # Now trigger a change; the debounce should fire and rotate.
+        target.write_text("r1\n")
+        for _ in range(200):
+            if (
+                registration.reload_event.done()
+                and registration.reload_event.result() == str(target)
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert registration.reload_event.result() == str(target)
 
 
 # ---------------------------------------------------------------------------
@@ -743,65 +1086,70 @@ class TestDispose:
         # After dispose, configs is empty.
         assert hmr._configs == {}
 
-    async def test_dispose_joins_pending_debounce_task(self, make_ctx, tmp_path: Path):
-        """Deterministically cover the ``debounce_task`` join branch in ``dispose``.
+    async def test_per_config_dispose_cancels_pending_reload_timer(self, make_ctx, tmp_path: Path):
+        """The per-config disposer cancels a pending ``hmr/reload`` timer.
 
-        The race-based pending-debounce test sometimes misses the
-        cancellation / join path; this test deterministically clears
-        the per-config disposers (so they don't pre-pop the configs
-        dict), attaches a live ``asyncio.Task`` to a registration's
-        ``debounce_task`` field, and asserts ``Hmr.dispose()`` cancels
-        and joins it via the top-level cancel/join loops.
+        The reload timer is scheduled by ``_debounce_and_emit_change_and_reload``
+        once the debounce window has elapsed. If dispose is called
+        while the timer is still armed, the per-config disposer must
+        cancel it so the emit cannot fire after teardown.
         """
-        target = tmp_path / "dj.yml"
+        target = tmp_path / "prt.yml"
         target.write_text("x")
         ctx = make_ctx()
-        hmr = Hmr(ctx)
+        hmr = Hmr(ctx, debounce=50)
         await hmr.register_config(str(target))
+        await asyncio.sleep(0.1)
+        target.write_text("x1")
+        # Wait until the reload timer is scheduled.
         registration = next(iter(hmr._configs.values()))
-        # Cancel the actual watch task so it doesn't keep the loop busy.
-        if registration.watch_task is not None and not registration.watch_task.done():
-            registration.watch_task.cancel()
-            with suppress(BaseException):
-                await registration.watch_task
-            registration.watch_task = None
+        for _ in range(200):
+            if registration.reload_timer is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert registration.reload_timer is not None
+        # Now dispose via the per-config disposer.
+        dispose = hmr._disposers[-1]()
+        if asyncio.iscoroutine(dispose):
+            await dispose
+        assert registration.reload_timer is None
 
-        async def _long_running():
-            await asyncio.sleep(60)
+    async def test_dispose_cancels_stray_reload_timer(self, make_ctx, tmp_path: Path):
+        """``Hmr.dispose()`` cancels reload_timers on registrations without a disposer.
 
-        registration.debounce_task = asyncio.create_task(_long_running())
-        # Remove the per-config disposer so it doesn't pop the entry
-        # from ``_configs`` before ``Hmr.dispose()`` reaches the join
-        # loop.
-        hmr._disposers.clear()
-        await hmr.dispose()
-        # The debounce task must have been cancelled.
-        assert registration.debounce_task.cancelled() or registration.debounce_task.done()
-        assert hmr._configs == {}
-
-    async def test_dispose_cancels_pending_watch_task(self, make_ctx, tmp_path: Path):
-        """Cover the watch_task cancel branch in ``dispose()`` top-level loop.
-
-        Without clearing the per-config disposer, the watch_task
-        cancel + join is handled there; with the disposer cleared,
-        the top-level ``Hmr.dispose()`` loop is the path that runs.
+        The cleanup loop in ``Hmr.dispose()`` is the only path that
+        catches entries that bypassed ``register_config`` (no disposer
+        is registered for them). Simulate this scenario by constructing
+        a registration directly and injecting it into ``_configs``;
+        verify that dispose() cancels its pending ``hmr/reload`` timer
+        without raising.
         """
-        target = tmp_path / "cwt.yml"
-        target.write_text("x")
+        from hmr.service import ConfigRegistration
+
         ctx = make_ctx()
         hmr = Hmr(ctx)
-        await hmr.register_config(str(target))
-        registration = next(iter(hmr._configs.values()))
-        # Make the watch_task a long-running coroutine.
-        async def _long_running():
-            await asyncio.sleep(60)
-        registration.watch_task = asyncio.create_task(_long_running())
-        registration.debounce_task = None
-        # Skip per-config disposer; force the top-level cancel/join path.
-        hmr._disposers.clear()
+        loop = asyncio.get_running_loop()
+
+        def _fake_reload() -> None:
+            return None
+
+        registration = ConfigRegistration(
+            filename="/injected/config.yml",
+            canonical_filename="/injected/config.yml",
+            watch_root="/injected",
+            depth=0,
+        )
+        registration.reload_timer = loop.call_later(60.0, _fake_reload)
+        assert registration.reload_timer is not None
+        hmr._configs[registration.canonical_filename] = registration
+        # No disposer registered for this entry.
+        assert hmr._disposers == []
+        # Should not raise and should cancel the timer.
         await hmr.dispose()
-        assert registration.watch_task.cancelled() or registration.watch_task.done()
-        assert hmr._configs == {}
+        assert registration.reload_timer is None
+        # The injected entry is intentionally left in _configs because
+        # dispose() does not own it; clear it out for teardown hygiene.
+        hmr._configs.clear()
 
     async def test_dispose_iterates_sync_disposer(self, make_ctx, tmp_path: Path):
         """Cover the sync-disposer back-edge in ``Hmr.dispose()``.
@@ -868,70 +1216,102 @@ class TestDispose:
         # Cleanup
         await hmr.dispose()
 
-    async def test_dispose_cancels_pending_debounce_task(self, make_ctx, tmp_path: Path):
-        """Cover lines 493 + 500-501 (debounce_task cancel + join in top-level loop).
-
-        Forces a state where the per-config disposer is bypassed (cleared)
-        and the registration still has a live ``debounce_task``. Mirrors
-        upstream ``Service.init`` defensive cleanup which closes every
-        watcher in ``configs`` regardless of registered disposers.
-        """
-        target = tmp_path / "cdt.yml"
-        target.write_text("d0\n", encoding="utf-8")
+    async def test_dispose_idempotent(self, make_ctx, tmp_path: Path):
+        """Calling ``Hmr.dispose()`` twice does not raise."""
+        target = tmp_path / "idem.yml"
+        target.write_text("i")
         ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=2000)  # long debounce window
+        hmr = Hmr(ctx)
+        await hmr.register_config(str(target))
+        await hmr.dispose()
+        await hmr.dispose()  # idempotent
+
+    async def test_dispose_handles_debounce_task_remaining(self, make_ctx, tmp_path: Path):
+        """A debounce task in flight is also cancelled on dispose."""
+        target = tmp_path / "deb.yml"
+        target.write_text("d")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=500)  # long debounce
         await hmr.register_config(str(target))
         await asyncio.sleep(0.1)
-        # Drop per-config disposers; force the top-level cancel/join path.
-        hmr._disposers.clear()
-        # Drive a change so a debounce_task is created + pending.
-        target.write_text("d1\n", encoding="utf-8")
-        registration = next(iter(hmr._configs.values()))
-        for _ in range(200):
-            if registration.debounce_task is not None and not registration.debounce_task.done():
-                break
-            await asyncio.sleep(0.01)
-        assert registration.watch_task is not None and not registration.watch_task.done()
-        assert registration.debounce_task is not None and not registration.debounce_task.done()
-        # Dispose: the top-level loop in ``Hmr.dispose()`` must cancel
-        # both watch_task + debounce_task and join them.
+        target.write_text("d1")  # start the debounce
+        await asyncio.sleep(0.05)
+        # Dispose while debounce is pending.
         await hmr.dispose()
-        assert registration.watch_task.cancelled() or registration.watch_task.done()
-        assert registration.debounce_task.cancelled() or registration.debounce_task.done()
+        # Configs are cleared.
         assert hmr._configs == {}
 
-    async def test_dispose_cancels_only_debounce_task(self, make_ctx, tmp_path: Path):
-        """Top-level cancel path runs even when only debounce_task needs cancellation.
-
-        Exercises the debounce-only branch: ``watch_task`` is already
-        done, but a pending ``debounce_task`` remains. With the per-config
-        disposer cleared, the top-level cleanup loop is the path that runs.
-        """
-        target = tmp_path / "dot.yml"
-        target.write_text("d0\n", encoding="utf-8")
+    async def test_dispose_with_no_configs_and_no_disposers(self, make_ctx):
+        """``dispose()`` is a no-op on a fresh service (no configs, no disposers)."""
         ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=2000)
+        hmr = Hmr(ctx)
+        await hmr.dispose()
+        await hmr.dispose()
+
+    async def test_register_config_dispose_is_idempotent(self, make_ctx, tmp_path: Path):
+        """The per-config disposer is safe to call multiple times."""
+        target = tmp_path / "safe.yml"
+        target.write_text("s")
+        ctx = make_ctx()
+        hmr = Hmr(ctx)
+        dispose = await hmr.register_config(str(target))
+        await dispose()
+        await dispose()  # no-op (entry was popped)
+        await dispose()  # still no-op
+
+    async def test_register_config_dispose_when_popped(self, make_ctx, tmp_path: Path):
+        """The dispose callable handles a no-op when entry is already removed."""
+        target = tmp_path / "pop.yml"
+        target.write_text("p")
+        ctx = make_ctx()
+        hmr = Hmr(ctx)
+        dispose = await hmr.register_config(str(target))
+        # Manually remove the registration to exercise the "entry is None" branch.
+        hmr._configs.clear()
+        await dispose()  # should not raise
+        await dispose()  # still should not raise
+
+    async def test_register_config_dispose_with_pending_debounce(self, make_ctx, tmp_path: Path):
+        """The dispose callable cancels + joins a pending debounce task."""
+        target = tmp_path / "pd.yml"
+        target.write_text("p")
+        ctx = make_ctx()
+        hmr = Hmr(ctx, debounce=500)  # long debounce
         await hmr.register_config(str(target))
         await asyncio.sleep(0.1)
-        # Drive a change so debounce_task is created.
-        target.write_text("d1\n", encoding="utf-8")
+        # Trigger a change to start a debounce task.
+        target.write_text("p1\n")
         registration = next(iter(hmr._configs.values()))
         for _ in range(200):
             if registration.debounce_task is not None and not registration.debounce_task.done():
                 break
             await asyncio.sleep(0.01)
-        # Override watch_task to one that's already done.
-        async def _noop():
-            return None
-
-        registration.watch_task = asyncio.create_task(_noop())
-        await registration.watch_task  # let it complete
-        assert registration.watch_task.done()
         assert registration.debounce_task is not None
-        hmr._disposers.clear()
+        # Cancel watch_task first so it doesn't keep the loop busy.
+        if registration.watch_task is not None and not registration.watch_task.done():
+            registration.watch_task.cancel()
+        dispose = hmr._disposers[-1]
+        # Capture the registration key before the disposer pops the entry.
+        canonical = next(iter(hmr._configs.keys()))
+        result = dispose()
+        if asyncio.iscoroutine(result):
+            await result
+        # The config should be removed.
+        assert canonical not in hmr._configs
+
+    async def test_dispose_join_handles_suppress(self, make_ctx, tmp_path: Path, monkeypatch):
+        """The join loop suppresses task exceptions during teardown."""
+        target = tmp_path / "sup.yml"
+        target.write_text("s")
+        ctx = make_ctx()
+        hmr = Hmr(ctx)
+        await hmr.register_config(str(target))
+        # Force a state where the watch_task is already done with an exception.
+        registration = next(iter(hmr._configs.values()))
+        if registration.watch_task is not None:
+            registration.watch_task.cancel()
+        # ``dispose`` should not propagate the cancellation.
         await hmr.dispose()
-        assert registration.debounce_task.cancelled() or registration.debounce_task.done()
-        assert hmr._configs == {}
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +1357,9 @@ class TestRefreshCallback:
         assert calls == ["async"]
 
     async def test_refresh_exception_logged(self, make_ctx, tmp_path: Path, caplog):
-        """A refresh callback that raises is logged, not propagated."""
+        """A sync ``refresh`` callback that raises is logged; watcher stays alive."""
+        import logging
+
         target = tmp_path / "boom.yml"
         target.write_text("b0")
         ctx = make_ctx()
@@ -986,281 +1368,21 @@ class TestRefreshCallback:
         def _boom():
             raise RuntimeError("refresh failure")
 
-        await hmr.register_config(str(target), refresh=_boom)
-        await asyncio.sleep(0.1)
-        # The watcher should still be alive after a refresh failure.
-        target.write_text("b1")
-        await asyncio.sleep(0.3)
-        # Service is still alive (we can still query it).
-        assert hmr._configs != {} or hmr._configs == {}  # always true; just check no crash
-
-    async def test_file_unlink_event_does_not_crash(self, make_ctx, tmp_path: Path):
-        """Deleting a watched file does not crash the watcher."""
-        target = tmp_path / "gone.yml"
-        target.write_text("g0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        target.unlink()
-        # Wait a bit and confirm no crash.
-        await asyncio.sleep(0.3)
-        assert hmr._configs != {} or True  # dispose order is up to test framework
-
-    async def test_reload_event_with_debounce_80ms(self, make_ctx, tmp_path: Path):
-        """Reload event timing: ~debounce ms after last change."""
-        target = tmp_path / "timing.yml"
-        target.write_text("t0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=80)
-        seen: list[str] = []
-
-        def _on_reload(_ctx, filename):
-            seen.append(filename)
-
-        ctx.on(EVENT_RELOAD, _on_reload)
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        target.write_text("t1")
-        for _ in range(300):
-            if seen:
-                break
-            await asyncio.sleep(0.01)
-        assert seen == [str(target)]
-
-    async def test_file_read_os_error_handled(self, make_ctx, tmp_path: Path, monkeypatch):
-        """``OSError`` from ``read_text`` is logged; watcher stays alive."""
-        from hmr import service as service_mod
-        target = tmp_path / "oserr.yml"
-        target.write_text("oe0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-
-        real_read_text = service_mod.Path.read_text
-
-        def _boom(self, *args, **kwargs):
-            err = OSError("io")
-            err.errno = 5
-            raise err
-
-        monkeypatch.setattr(service_mod.Path, "read_text", _boom)
-        try:
-            await hmr.register_config(str(target))
-            # Modify the file via the OS directly (bypassing read_text).
-            target.write_text("oe1")
+        with caplog.at_level(logging.WARNING, logger="hmr.service"):
+            await hmr.register_config(str(target), refresh=_boom)
+            await asyncio.sleep(0.1)
+            # Trigger the refresh path.
+            target.write_text("b1")
             await asyncio.sleep(0.3)
-            # Service is still alive.
-            assert hmr._configs != {} or True
-        finally:
-            monkeypatch.setattr(service_mod.Path, "read_text", real_read_text)
-
-    async def test_register_config_watcher_timeout(self, make_ctx, tmp_path: Path, monkeypatch):
-        """If the watcher fails to signal ready, ``HmrError`` is raised."""
-        from hmr import service as service_mod
-
-        target = tmp_path / "timeo.yml"
-        target.write_text("x")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-
-        # Replace ``_set_future_if_pending`` with a no-op so the
-        # ``ready_event`` is never resolved.
-        monkeypatch.setattr(
-            service_mod, "_set_future_if_pending", lambda fut, val: None
-        )
-        # Also shorten the wait timeout by monkeypatching asyncio.wait_for
-        # is intrusive; instead, replace the timeout in the service.
-        # Easier: replace the watch task to not resolve the event.
-        # We do this by wrapping ``_run_watcher`` to not resolve.
-        original = service_mod.Hmr._run_watcher
-
-        async def _never_ready(*args, **kwargs):
-            # Block forever; the test relies on the timeout (2.0s).
-            await asyncio.Event().wait()
-
-        monkeypatch.setattr(service_mod.Hmr, "_run_watcher", _never_ready)
-        try:
-            with pytest.raises(HmrError, match="failed to start"):
-                await hmr.register_config(str(target))
-        finally:
-            monkeypatch.setattr(service_mod.Hmr, "_run_watcher", original)
-
-    async def test_register_config_watcher_exception(self, make_ctx, tmp_path: Path, monkeypatch):
-        """If the watcher raises, ``HmrError`` wraps the error."""
-        from hmr import service as service_mod
-
-        target = tmp_path / "exc.yml"
-        target.write_text("x")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-
-        class _CustomError(Exception):
-            pass
-
-        async def _patched_run_watcher(self, registration, watch_root, depth, refresh):
-            # Mimic the real _run_watcher: do NOT resolve the ready_event;
-            # instead, set its exception (this happens in the real code
-            # when ``awatch`` raises). Then wait_for re-raises.
-            await asyncio.sleep(0.05)  # let register_config reach wait_for
-            if not registration.ready_event.done():
-                registration.ready_event.set_exception(_CustomError("explode"))
-            raise _CustomError("explode")
-
-        monkeypatch.setattr(service_mod.Hmr, "_run_watcher", _patched_run_watcher)
-        with pytest.raises(HmrError) as info:
-            await hmr.register_config(str(target))
-        # The HmrError message should contain "failed to start".
-        assert "failed to start" in str(info.value)
-
-    async def test_dispose_idempotent(self, make_ctx, tmp_path: Path):
-        """Calling ``dispose()`` twice does not raise."""
-        target = tmp_path / "idem.yml"
-        target.write_text("i")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-        await hmr.register_config(str(target))
-        await hmr.dispose()
-        await hmr.dispose()  # idempotent
-
-    async def test_dispose_handles_debounce_task_remaining(self, make_ctx, tmp_path: Path):
-        """A debounce task in flight is also cancelled on dispose."""
-        target = tmp_path / "deb.yml"
-        target.write_text("d")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=500)  # long debounce
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        target.write_text("d1")  # start the debounce
-        await asyncio.sleep(0.05)
-        # Dispose while debounce is pending.
-        await hmr.dispose()
-        # Configs are cleared.
-        assert hmr._configs == {}
-
-    async def test_register_config_dispose_is_idempotent(self, make_ctx, tmp_path: Path):
-        """The per-config disposer is safe to call multiple times."""
-        target = tmp_path / "safe.yml"
-        target.write_text("s")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-        dispose = await hmr.register_config(str(target))
-        await dispose()
-        await dispose()  # no-op (entry was popped)
-        await dispose()  # still no-op
-
-    async def test_register_config_dispose_when_popped(self, make_ctx, tmp_path: Path):
-        """The dispose callable handles a no-op when entry is already removed."""
-        target = tmp_path / "pop.yml"
-        target.write_text("p")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-        dispose = await hmr.register_config(str(target))
-        # Manually remove the registration to exercise the "entry is None" branch.
-        hmr._configs.clear()
-        await dispose()  # should not raise
-        await dispose()  # still should not raise
-
-    async def test_register_config_dispose_with_pending_debounce(self, make_ctx, tmp_path: Path):
-        """The dispose callable joins a pending debounce task."""
-        target = tmp_path / "pd.yml"
-        target.write_text("p")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=500)  # long debounce
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        # Trigger a change to start a debounce task.
-        target.write_text("p1\n")
-        registration = next(iter(hmr._configs.values()))
-        for _ in range(200):
-            if registration.debounce_task is not None and not registration.debounce_task.done():
-                break
-            await asyncio.sleep(0.01)
-        assert registration.debounce_task is not None
-        # Now dispose via the per-config disposer.
-        # Cancel watch_task first so it doesn't keep the loop busy.
-        if registration.watch_task is not None and not registration.watch_task.done():
-            registration.watch_task.cancel()
-        # The debounce_task is still running; the per-config dispose
-        # callable should cancel and join it.
-        dispose = next(iter(hmr._disposers))
-        # Call the disposer to exercise the join path.
-        # Find the registration key.
-        canonical = next(iter(hmr._configs.keys()))
-        # Get the per-config disposer (it's the last one in the list).
-        result = dispose()
-        if asyncio.iscoroutine(result):
-            await result
-        # The config should be removed.
-        assert canonical not in hmr._configs
-
-    async def test_dispose_join_handles_suppress(self, make_ctx, tmp_path: Path, monkeypatch):
-        """The join loop suppresses task exceptions during teardown."""
-        target = tmp_path / "sup.yml"
-        target.write_text("s")
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-        await hmr.register_config(str(target))
-        # Force a state where the watch_task is already done with an exception.
-        registration = next(iter(hmr._configs.values()))
-        if registration.watch_task is not None:
-            registration.watch_task.cancel()
-        # ``dispose`` should not propagate the cancellation.
-        await hmr.dispose()
-
-    async def test_register_config_relative_via_base(self, make_ctx, tmp_path: Path):
-        """A relative path resolves through ``base_dir``; both absolute and relative work."""
-        target = tmp_path / "abs.yml"
-        target.write_text("v")
-        ctx = make_ctx()
-        ctx.baseUrl = f"file://{tmp_path}"
-        hmr = Hmr(ctx, base=".")
-        # Absolute path.
-        dispose = await hmr.register_config(str(target))
-        await dispose()
-
-    async def test_dispose_with_no_configs_and_no_disposers(self, make_ctx):
-        """``dispose()`` is a no-op on a fresh service."""
-        ctx = make_ctx()
-        hmr = Hmr(ctx)
-        await hmr.dispose()
-        await hmr.dispose()
-
-    async def test_multiple_changes_rotate_futures(self, make_ctx, tmp_path: Path):
-        """Each change rotates ``change_event`` and ``reload_event``."""
-        target = tmp_path / "rot.yml"
-        target.write_text("r0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-        change_events: list[tuple[str, str]] = []
-        reload_events: list[str] = []
-
-        def _on_change(_ctx, filename, content):
-            change_events.append((filename, content))
-
-        def _on_reload(_ctx, filename):
-            reload_events.append(filename)
-
-        ctx.on(EVENT_CHANGE, _on_change)
-        ctx.on(EVENT_RELOAD, _on_reload)
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        target.write_text("r1")
-        for _ in range(300):
-            if reload_events:
-                break
-            await asyncio.sleep(0.01)
-        assert len(reload_events) >= 1
-        # Now trigger a second change.
-        target.write_text("r2")
-        for _ in range(300):
-            if len(reload_events) >= 2:
-                break
-            await asyncio.sleep(0.01)
-        assert len(reload_events) >= 2
+        # The watcher survived the refresh failure.
+        assert len(hmr._configs) == 1
+        # And the warning was logged.
+        assert any("refresh" in r.message.lower() for r in caplog.records)
 
     async def test_refresh_callback_raises(self, make_ctx, tmp_path: Path, caplog):
-        """A refresh callback that raises is logged, watcher stays alive."""
+        """A refresh callback that raises is logged; watcher stays alive."""
         import logging
+
         target = tmp_path / "rfail.yml"
         target.write_text("x")
         ctx = make_ctx()
@@ -1275,191 +1397,7 @@ class TestRefreshCallback:
             target.write_text("y")
             # Wait long enough for the refresh to fire and fail.
             await asyncio.sleep(0.3)
-        # The watcher should still be alive.
-        assert hmr._configs != {} or True
-        # And the warning should have been logged.
+        # The watcher survived.
+        assert len(hmr._configs) == 1
+        # And the warning was logged.
         assert any("refresh" in r.message.lower() for r in caplog.records)
-
-    async def test_register_config_consecutive_changes(self, make_ctx, tmp_path: Path):
-        """Two consecutive changes (each after debounce) both fire events."""
-        target = tmp_path / "consec.yml"
-        target.write_text("c0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-        events: list[tuple[str, str]] = []
-        ctx.on(EVENT_CHANGE, lambda _c, fn, ct: events.append((fn, ct)))
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        target.write_text("c1")
-        for _ in range(300):
-            if events:
-                break
-            await asyncio.sleep(0.01)
-        assert events
-        # Second change
-        target.write_text("c2")
-        for _ in range(300):
-            if len(events) >= 2:
-                break
-            await asyncio.sleep(0.01)
-        assert len(events) >= 2
-
-    async def test_reload_event_rotates_when_already_done(self, make_ctx, tmp_path: Path):
-        """A second change rotates the per-registration ``reload_event`` future."""
-        target = tmp_path / "reload_rot.yml"
-        target.write_text("r0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        registration = next(iter(hmr._configs.values()))
-        original_reload = registration.reload_event
-        # First change: resolves the reload future.
-        target.write_text("r1")
-        for _ in range(300):
-            if original_reload.done():
-                break
-            await asyncio.sleep(0.01)
-        assert original_reload.done()
-        # Second change: should rotate to a new future.
-        target.write_text("r2")
-        for _ in range(300):
-            if registration.reload_event is not original_reload and registration.reload_event.done():
-                break
-            await asyncio.sleep(0.01)
-        assert registration.reload_event is not original_reload
-        assert registration.reload_event.done()
-
-    async def test_reload_event_debounce_creates_new_future(self, make_ctx, tmp_path: Path):
-        """When the reload_event is already done when the debounce fires, a new future is created and resolved."""
-        target = tmp_path / "rn.yml"
-        target.write_text("r0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=80)
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        registration = next(iter(hmr._configs.values()))
-        # Pre-resolve the reload_event to put it in "done" state.
-        registration.reload_event.set_result("/already/done")
-        # Now trigger a change; the debounce should fire and rotate.
-        target.write_text("r1\n")
-        # Wait for the debounce to complete.
-        for _ in range(200):
-            if registration.reload_event.done() and registration.reload_event.result() == str(target):
-                break
-            await asyncio.sleep(0.01)
-        assert registration.reload_event.result() == str(target)
-
-    async def test_register_config_read_text_file_not_found(self, make_ctx, tmp_path: Path, monkeypatch):
-        """``read_text`` raising ``FileNotFoundError`` is handled gracefully."""
-        from hmr import service as service_mod
-
-        target = tmp_path / "rfnf.yml"
-        target.write_text("x")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-
-        real_read_text = service_mod.Path.read_text
-
-        def _raise_fnf(self, *args, **kwargs):
-            raise FileNotFoundError(self)
-
-        monkeypatch.setattr(service_mod.Path, "read_text", _raise_fnf)
-        try:
-            await hmr.register_config(str(target))
-            # Modify the file to trigger the watch loop. The read will
-            # raise FileNotFoundError and be caught.
-            target.write_text("y")
-            await asyncio.sleep(0.2)
-            # The watcher should still be alive.
-            assert hmr._configs != {} or True
-        finally:
-            monkeypatch.setattr(service_mod.Path, "read_text", real_read_text)
-
-    async def test_rapid_changes_cancel_in_flight_debounce(self, make_ctx, tmp_path: Path):
-        """A new change cancels the in-flight debounce task before scheduling a new one."""
-        target = tmp_path / "rapid.yml"
-        target.write_text("r0")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=500)  # longer debounce so we can interrupt it
-        events: list[tuple[str, str]] = []
-        ctx.on(EVENT_CHANGE, lambda _c, fn, ct: events.append((fn, ct)))
-        await hmr.register_config(str(target))
-        await asyncio.sleep(0.1)
-        # First change (starts a debounce).
-        target.write_text("r1\n")
-        # Wait for the debounce_task to be created.
-        registration = next(iter(hmr._configs.values()))
-        for _ in range(200):
-            if registration.debounce_task is not None and not registration.debounce_task.done():
-                break
-            await asyncio.sleep(0.01)
-        assert registration.debounce_task is not None
-        assert not registration.debounce_task.done()
-        # Second change should cancel the in-flight debounce.
-        target.write_text("r2\n")
-        # Wait for the new debounce to fire (500ms + buffer).
-        for _ in range(200):
-            if events:
-                break
-            await asyncio.sleep(0.01)
-        # The events should reflect the final state.
-        assert events
-        assert events[-1][1] == "r2\n"
-
-    async def test_watcher_internal_exception(self, make_ctx, tmp_path: Path, monkeypatch, caplog):
-        """An exception raised inside ``_run_watcher`` is logged and surfaces via HmrError."""
-        import logging
-
-        from hmr import service as service_mod
-
-        target = tmp_path / "watch_exc.yml"
-        target.write_text("x")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-
-        # Patch awatch to raise immediately when entered.
-        async def _boom_awatch(*args, **kwargs):
-            raise RuntimeError("awatch boom")
-            if False:  # pragma: no cover — make it a generator
-                yield
-
-        monkeypatch.setattr(service_mod, "awatch", _boom_awatch)
-        with caplog.at_level(logging.WARNING, logger="hmr.service"):
-            with pytest.raises(HmrError):
-                await hmr.register_config(str(target))
-            # Wait for the watch task to finish.
-            await asyncio.sleep(0.1)
-        # A warning should have been logged.
-        assert any("watcher" in r.message.lower() for r in caplog.records)
-
-    async def test_watcher_exception_after_ready_resolved(self, make_ctx, tmp_path: Path, monkeypatch, caplog):
-        """If the watcher raises after the ready_event is resolved, the inner except handler logs and re-raises (skipping ``set_exception`` because the event is already done)."""
-        import logging
-
-        from hmr import service as service_mod
-
-        target = tmp_path / "after_ready.yml"
-        target.write_text("x")
-        ctx = make_ctx()
-        hmr = Hmr(ctx, debounce=50)
-
-        # Patch awatch to immediately raise AFTER the first iteration
-        # (so the ready_event is set, but then the awatch loop raises).
-        async def _boom_awatch(*args, **kwargs):
-            if False:
-                yield  # never executed; satisfies generator requirement
-            raise RuntimeError("post-ready boom")
-
-        monkeypatch.setattr(service_mod, "awatch", _boom_awatch)
-        with caplog.at_level(logging.WARNING, logger="hmr.service"):
-            # register_config's wait_for will time out (or the watch task fails).
-            with pytest.raises(HmrError):
-                await hmr.register_config(str(target))
-            # Wait for the warning to be logged.
-            for _ in range(100):
-                if any("watcher" in r.message.lower() for r in caplog.records):
-                    break
-                await asyncio.sleep(0.01)
-        # The warning should have been logged.
-        assert any("watcher" in r.message.lower() for r in caplog.records)

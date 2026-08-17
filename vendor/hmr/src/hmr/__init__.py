@@ -19,10 +19,10 @@ from hmr.service import (
 )
 
 __all__ = [
-    "Hmr",
-    "HmrConfig",
     "ConfigRegistration",
-    "HmrError",
     "EVENT_CHANGE",
     "EVENT_RELOAD",
+    "Hmr",
+    "HmrConfig",
+    "HmrError",
 ]

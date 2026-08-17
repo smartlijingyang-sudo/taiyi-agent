@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 EVENT_CHANGE = "hmr/change"
 EVENT_RELOAD = "hmr/reload"
 
+# Delay between the debounce settling and the ``hmr/reload`` emit.
+# Kept small so subscribers see ``hmr/change`` first, then ``hmr/reload``
+# shortly after, even when ``HmrConfig.debounce`` is large.
+RELOAD_DELAY_S = 0.05
+
 
 # ---------------------------------------------------------------------------
 # Config schema
@@ -193,6 +198,9 @@ class ConfigRegistration:
     # Active tasks (watch + debounce); cancelled on dispose.
     watch_task: asyncio.Task[None] | None = None
     debounce_task: asyncio.Task[None] | None = None
+    # Pending ``hmr/reload`` timer handle from ``loop.call_later``;
+    # cancelled on dispose so the emit does not fire after teardown.
+    reload_timer: asyncio.TimerHandle | None = None
     # Ready future resolved once the watcher is initialized.
     ready_event: asyncio.Future[None] = field(default=None)  # type: ignore[assignment]
 
@@ -331,6 +339,9 @@ class Hmr(Service):
                 entry.watch_task.cancel()
             if entry.debounce_task is not None and not entry.debounce_task.done():
                 entry.debounce_task.cancel()
+            if entry.reload_timer is not None:
+                entry.reload_timer.cancel()
+                entry.reload_timer = None
             if entry.watch_task is not None:
                 with suppress(BaseException):
                     await entry.watch_task
@@ -388,7 +399,9 @@ class Hmr(Service):
                 kind = _change_to_kind(relevant[0][0])
                 try:
                     content = (
-                        Path(registration.filename).read_text(encoding="utf-8")  # noqa: ASYNC240
+                        await asyncio.to_thread(
+                            Path(registration.filename).read_text, encoding="utf-8"
+                        )
                         if kind != "unlink"
                         else ""
                     )
@@ -466,14 +479,13 @@ class Hmr(Service):
         if registration.reload_event.done():  # pragma: no cover — defensive
             registration.reload_event = asyncio.get_running_loop().create_future()
         registration.reload_event.set_result(registration.filename)
-        # Schedule ``hmr/reload`` shortly after the change.
+        # Schedule ``hmr/reload`` shortly after the change. Track the
+        # handle on the registration so dispose() can cancel it.
         loop = asyncio.get_running_loop()
-        try:
-            delay = (self._validated_config.debounce if self._validated_config else 100) / 1000.0
-        except Exception:  # pragma: no cover — defensive
-            delay = 0.1
-        loop.call_later(
-            delay,
+        if registration.reload_timer is not None:
+            registration.reload_timer.cancel()
+        registration.reload_timer = loop.call_later(
+            RELOAD_DELAY_S,
             _emit_reload,
             self.ctx,
             registration.filename,
@@ -484,8 +496,17 @@ class Hmr(Service):
     # ------------------------------------------------------------------
 
     async def dispose(self) -> None:
-        """Cancel every active watcher and join in-flight tasks."""
-        # Cancel and join every per-config disposer.
+        """Cancel every active watcher and join in-flight tasks.
+
+        Cleanup goes through the per-config disposers registered by
+        :meth:`register_config`: each disposer cancels the matching
+        watch + debounce tasks, cancels any pending ``hmr/reload``
+        timer, joins the tasks, and pops the registration from
+        ``_configs``. The follow-up loop is a defensive net for any
+        registration that bypassed ``register_config`` (e.g., test
+        injection): it cancels its pending ``hmr/reload`` timer so the
+        emit cannot fire after teardown.
+        """
         for dispose in self._disposers:
             try:
                 result = dispose()
@@ -494,20 +515,14 @@ class Hmr(Service):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("hmr: disposer raised %s", exc)
         self._disposers.clear()
+        # Defensive: cancel any reload_timer left on entries that did
+        # not go through ``register_config`` (no disposer is registered
+        # for them). Without this, an injected registration could leak
+        # its timer into the next event-loop iteration.
         for registration in list(self._configs.values()):
-            if registration.watch_task is not None and not registration.watch_task.done():
-                registration.watch_task.cancel()
-            if registration.debounce_task is not None and not registration.debounce_task.done():
-                registration.debounce_task.cancel()
-        # Join.
-        for registration in list(self._configs.values()):
-            if registration.watch_task is not None:
-                with suppress(BaseException):
-                    await registration.watch_task
-            if registration.debounce_task is not None:
-                with suppress(BaseException):
-                    await registration.debounce_task
-        self._configs.clear()
+            if registration.reload_timer is not None:
+                registration.reload_timer.cancel()
+                registration.reload_timer = None
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -521,9 +536,10 @@ class Hmr(Service):
 
 
 __all__ = [
-    "Hmr",
-    "HmrConfig",
     "ConfigRegistration",
     "EVENT_CHANGE",
     "EVENT_RELOAD",
+    "Hmr",
+    "HmrConfig",
+    "RELOAD_DELAY_S",
 ]
