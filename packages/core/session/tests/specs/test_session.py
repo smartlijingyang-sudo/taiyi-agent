@@ -1782,11 +1782,13 @@ def test_session_append_publish_to_store_no_entry_is_silent() -> None:
 def test_collect_session_callbacks_swallows_dispatch_exception() -> None:
     """A dispatch failure returns an empty listener list."""
 
+    class _BoomyEvents:
+        @staticmethod
+        def dispatch(*args, **kwargs):
+            raise RuntimeError("dispatch boom")
+
     class BrokenCtx:
-        class Events:
-            @staticmethod
-            def dispatch(*args, **kwargs):
-                raise RuntimeError("dispatch boom")
+        events = _BoomyEvents
 
     callbacks = collect_session_callbacks(BrokenCtx(), ["session/event"])
     assert callbacks == []
