@@ -122,6 +122,7 @@ class DeepSeekProvider:
 
                         try:
                             obj = json.loads(payload)
+                            # print(f"[DeepSeek] SSE: {json.dumps(obj)[:200]}", flush=True)
                         except json.JSONDecodeError:
                             continue
 

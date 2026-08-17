@@ -1,40 +1,26 @@
-from cordis import Context, Service, plugin
+"""taiyi-llm plugin — registers LLMService with no providers.
 
+Providers (deepseek, openai, ...) self-register from their own `@plugin`
+setup fn. This plugin only provides the `ctx.llm` seam.
+"""
 
-class LLMServiceAdapter(Service):
-    """LLMService 的 cordis Service 包装。"""
+from __future__ import annotations
 
-    def __init__(self, ctx: Context) -> None:
-        from taiyi_llm import LLMService
-        super().__init__(ctx)
-        self._service = LLMService()
+from cordis import plugin
 
-    @property
-    def _providers(self):
-        """暴露底层 service 的 _providers（供 llm-retry 等插件使用）。"""
-        return self._service._providers
-
-    @property
-    def service(self) -> "LLMService":
-        return self._service
-
-    def register_provider(self, provider, default: bool = False) -> None:
-        self._service.register_provider(provider, default=default)
-
-    async def stream(self, **kwargs):
-        async for chunk in self._service.stream(**kwargs):
-            yield chunk
-
-    async def complete(self, **kwargs) -> str:
-        return await self._service.complete(**kwargs)
-
-    async def dispose(self) -> None:
-        pass
+from .service import LLMService
 
 
 @plugin
-async def setup(ctx: Context, config: dict | None) -> None:
-    """注册 LLMService。"""
-    svc = LLMServiceAdapter(ctx)
+async def setup(ctx, config):
+    """Mount the LLMService under `ctx.llm`.
+
+    Providers register themselves later in the load order (typically after
+    this plugin); dispatch falls back to `default_provider` until then.
+    """
+    svc = LLMService(ctx)
     ctx.provide("llm", svc)
     ctx.effect(svc, name="llm:service")
+
+
+__all__ = ["setup"]

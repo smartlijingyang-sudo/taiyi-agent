@@ -8,8 +8,8 @@ class AgentRegistryAdapter(Service):
         from taiyi_core_agent import AgentRegistry, Agent
         super().__init__(ctx)
         self._service = AgentRegistry()
-        # 注册默认 agent
-        self._service.register(Agent(name="default", model="deepseek-chat"))
+        # 注册默认 agent（使用 minimax-m3）
+        self._service.register(Agent(name="default", model="minimax-m3"))
 
     @property
     def service(self) -> "AgentRegistry":
