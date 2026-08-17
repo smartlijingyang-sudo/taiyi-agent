@@ -1,0 +1,16 @@
+[project]
+name = "taiyi-core-tools"
+version = "0.1.0"
+description = "工具注册 + 守卫执行管线"
+requires-python = ">=3.11"
+dependencies = [
+    "taiyi-cordis",
+    "taiyi-cosmokit",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taiyi_core_tools"]

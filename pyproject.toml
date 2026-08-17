@@ -1,0 +1,91 @@
+[project]
+name = "taiyi-agent"
+version = "0.1.0"
+description = "Taiyi-Agent — deepseek-harness 的 Python MVP 复刻 (一切皆插件)"
+requires-python = ">=3.11"
+dependencies = [
+    "taiyi-cordis",
+    "taiyi-schemastery",
+    "taiyi-cosmokit",
+    "taiyi-core-scope",
+    "taiyi-core-sessions",
+    "taiyi-core-system-prompt",
+    "taiyi-core-tools",
+    "taiyi-core-agent",
+    "taiyi-core-agent-loop",
+    "taiyi-llm",
+    "taiyi-llm-deepseek",
+    "taiyi-llm-retry",
+    "taiyi-host-webserver",
+    "taiyi-api",
+    "taiyi-web",
+    "taiyi-bundle-base",
+    "taiyi-bundle-web-app",
+    "taiyi-cli",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.6",
+]
+
+[project.scripts]
+taiyi = "taiyi_agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taiyi_agent"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[tool.uv.workspace]
+members = [
+    "vendor/*",
+    "packages/core/*",
+    "packages/llm/*",
+    "packages/host/*",
+    "packages/api",
+    "packages/web",
+    "packages/bundle/*",
+    "packages/cli",
+]
+
+[tool.uv.sources]
+taiyi-cordis = { workspace = true }
+taiyi-schemastery = { workspace = true }
+taiyi-cosmokit = { workspace = true }
+taiyi-core-scope = { workspace = true }
+taiyi-core-sessions = { workspace = true }
+taiyi-core-system-prompt = { workspace = true }
+taiyi-core-tools = { workspace = true }
+taiyi-core-agent = { workspace = true }
+taiyi-core-agent-loop = { workspace = true }
+taiyi-llm = { workspace = true }
+taiyi-llm-deepseek = { workspace = true }
+taiyi-llm-retry = { workspace = true }
+taiyi-host-webserver = { workspace = true }
+taiyi-api = { workspace = true }
+taiyi-web = { workspace = true }
+taiyi-bundle-base = { workspace = true }
+taiyi-bundle-web-app = { workspace = true }
+taiyi-cli = { workspace = true }
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
