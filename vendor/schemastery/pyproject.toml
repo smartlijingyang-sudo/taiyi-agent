@@ -5,6 +5,7 @@ description = "taiyi-schemastery — 1:1 Python port of @deepseek-ai/schemastery
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
+    "taiyi-cosmokit",
 ]
 
 [build-system]

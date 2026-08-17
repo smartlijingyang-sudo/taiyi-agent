@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 members = [
     "taiyi-agent",
     "taiyi-cordis",
+    "taiyi-core-scope",
+    "taiyi-core-session",
     "taiyi-cosmokit",
     "taiyi-group",
     "taiyi-hmr",
@@ -457,6 +459,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "taiyi-cordis" },
+    { name = "taiyi-core-scope" },
+    { name = "taiyi-core-session" },
 ]
 
 [package.dev-dependencies]
@@ -470,7 +474,11 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "taiyi-cordis", editable = "vendor/cordis" }]
+requires-dist = [
+    { name = "taiyi-cordis", editable = "vendor/cordis" },
+    { name = "taiyi-core-scope", editable = "packages/core/scope" },
+    { name = "taiyi-core-session", editable = "packages/core/session" },
+]
 
 [package.metadata.requires-dev]
 dev = [
@@ -498,8 +506,34 @@ requires-dist = [
 ]
 
 [[package]]
+name = "taiyi-core-scope"
+version = "0.1.0"
+source = { editable = "packages/core/scope" }
+dependencies = [
+    { name = "taiyi-cordis" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "taiyi-cordis", editable = "vendor/cordis" }]
+
+[[package]]
+name = "taiyi-core-session"
+version = "0.1.0"
+source = { editable = "packages/core/session" }
+dependencies = [
+    { name = "taiyi-cordis" },
+    { name = "taiyi-core-scope" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "taiyi-cordis", editable = "vendor/cordis" },
+    { name = "taiyi-core-scope", editable = "packages/core/scope" },
+]
+
+[[package]]
 name = "taiyi-cosmokit"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "vendor/cosmokit" }
 
 [[package]]
@@ -533,10 +567,14 @@ version = "0.1.0"
 source = { editable = "vendor/schemastery" }
 dependencies = [
     { name = "pydantic" },
+    { name = "taiyi-cosmokit" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.6" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.6" },
+    { name = "taiyi-cosmokit", editable = "vendor/cosmokit" },
+]
 
 [[package]]
 name = "taiyi-timer"

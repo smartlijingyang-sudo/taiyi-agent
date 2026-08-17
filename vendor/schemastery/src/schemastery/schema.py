@@ -30,16 +30,17 @@ from collections.abc import Mapping as _Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from schemastery._cosmokit_compat import (
+from cosmokit import (
     Binary,
     clone,
-    deep_equal,
-    filter_keys,
-    is_nullable,
-    is_plain_object,
+    deepEqual,
+    filterKeys,
+    isNullable,
+    isPlainObject,
     pick,
-    value_map,
+    valueMap,
 )
+
 from schemastery.error import Options, ValidationError
 
 __all__ = [
@@ -275,18 +276,18 @@ class Schema:
 
     def simplify(self, value: Any) -> Any:  # noqa: C901 - 1:1 with TS
         strict = self.type == "dict"
-        if deep_equal(value, self.meta.get("default"), strict):
+        if deepEqual(value, self.meta.get("default"), strict):
             return None
-        if is_nullable(value):
+        if isNullable(value):
             return value
         if self.type in ("object", "dict"):
             result: dict[str, Any] = {}
             for key, item in value.items():
                 inner_schema = self.dict.get(key) if self.type == "object" else self.inner  # type: ignore[union-attr]
                 simplified = inner_schema.simplify(item) if inner_schema is not None else item
-                if self.type == "dict" or not is_nullable(simplified):
+                if self.type == "dict" or not isNullable(simplified):
                     result[key] = simplified
-            if deep_equal(result, self.meta.get("default"), strict):
+            if deepEqual(result, self.meta.get("default"), strict):
                 return None
             return result
         if self.type in ("array", "tuple"):
@@ -324,7 +325,7 @@ class Schema:
         if desc:
             new.meta["description"] = desc
         if new.dict is not None:
-            new.dict = value_map(
+            new.dict = valueMap(
                 new.dict,
                 lambda inner, key: inner.i18n(_dict_message_map(messages, key)),
             )
@@ -363,7 +364,7 @@ def _get_inner(value: Any) -> Any:
 def _extract_keys(data: Any) -> dict[str, Any]:
     if not isinstance(data, _Mapping) or isinstance(data, (str, bytes)):
         return {}
-    return filter_keys(data, lambda key, _value: not key.startswith("$"))
+    return filterKeys(dict(data), lambda key, _value: not key.startswith("$"))
 
 
 def _merge_desc(
@@ -396,7 +397,7 @@ def _dict_message_map(messages: dict[str, Any], key: str) -> dict[str, Any]:
             return data.get(key)
         return None
 
-    return value_map(messages, _transform)
+    return valueMap(messages, _transform)
 
 
 def _list_message_map(messages: dict[str, Any], index: int) -> dict[str, Any]:
@@ -408,7 +409,7 @@ def _list_message_map(messages: dict[str, Any], index: int) -> dict[str, Any]:
             return data[index]
         return _extract_keys(data or {})
 
-    return value_map(messages, _transform)
+    return valueMap(messages, _transform)
 
 
 def _inner_message_map(messages: dict[str, Any]) -> dict[str, Any]:
@@ -418,7 +419,7 @@ def _inner_message_map(messages: dict[str, Any]) -> dict[str, Any]:
             return inner
         return _extract_keys(data or {})
 
-    return value_map(messages, _transform)
+    return valueMap(messages, _transform)
 
 
 def _s_key_message_map(messages: dict[str, Any]) -> dict[str, Any]:
@@ -427,7 +428,7 @@ def _s_key_message_map(messages: dict[str, Any]) -> dict[str, Any]:
             return data.get("$key")
         return None
 
-    return value_map(messages, _transform)
+    return valueMap(messages, _transform)
 
 
 # ---------------------------------------------------------------------------
@@ -454,16 +455,16 @@ def _resolve(
     if ignore is not None and ignore(data, schema):
         return (data, None)
 
-    if is_nullable(data) and schema.type != "lazy":
+    if isNullable(data) and schema.type != "lazy":
         if schema.meta.get("required"):
             raise ValidationError("missing required value", opts)
         current: Schema | None = schema
         fallback: Any = schema.meta.get("default")
-        while current is not None and current.type == "intersect" and is_nullable(fallback):
+        while current is not None and current.type == "intersect" and isNullable(fallback):
             inner_list = current.list or []
             current = inner_list[0] if inner_list else None
             fallback = current.meta.get("default") if current is not None else None
-        if is_nullable(fallback):
+        if isNullable(fallback):
             return (data, None)
         data = clone(fallback)
 
@@ -480,7 +481,7 @@ def _resolve(
 
 def _from_(source: Any) -> Schema:
     """Infer a schema from a primitive value, constructor, or existing schema."""
-    if is_nullable(source):
+    if isNullable(source):
         return _construct(Schema, type="any")
     if isinstance(source, Schema):
         return source
@@ -789,7 +790,7 @@ def _resolve_lazy(data: Any, schema: Schema, options: Options, strict: bool) -> 
     # Defer construction until we actually need to validate non-null input.
     # This mirrors the TS contract but adds an explicit short-circuit so a
     # null leaf in a recursive tree doesn't spin the builder forever.
-    if is_nullable(data):
+    if isNullable(data):
         return (data, None)
     if schema.inner is None or not isinstance(schema.inner, Schema):
         schema.inner = schema.builder()  # type: ignore[misc]
@@ -807,7 +808,7 @@ def _resolve_never(data: Any, _schema: Schema, options: Options, _strict: bool =
 
 
 def _resolve_const(data: Any, schema: Schema, options: Options, _strict: bool = False) -> tuple[Any, None]:
-    if deep_equal(data, schema.value):
+    if deepEqual(data, schema.value):
         return (schema.value, None)
     raise ValidationError(f"expected {schema.value} but got {data}", options)
 
@@ -876,7 +877,7 @@ def _resolve_is(data: Any, schema: Schema, options: Options, _strict: bool = Fal
         if isinstance(data, constructor):
             return (data, None)
         raise ValidationError(f"expected {constructor.__name__} but got {data}", options)
-    if is_nullable(data):
+    if isNullable(data):
         raise ValidationError(f"expected {constructor} but got {data}", options)
     cls_name = constructor  # type: ignore[assignment]
     current_type = type(data)
@@ -891,7 +892,7 @@ def _resolve_array(data: Any, schema: Schema, options: Options, _strict: bool = 
     if not isinstance(data, list):
         raise ValidationError(f"expected array but got {data}", options)
     inner = schema.inner
-    skip_min = is_nullable(inner.meta.get("default")) if inner is not None else True
+    skip_min = isNullable(inner.meta.get("default")) if inner is not None else True
     _check_within_range(len(data), schema.meta, "array length", options, skip_min)
     result = [_resolve_array_index(data, index, inner, options) for index in range(len(data))]
     return (result, None)
@@ -925,7 +926,7 @@ def _resolve_dict(
     options: Options,
     strict: bool,
 ) -> tuple[Any, None]:
-    if not is_plain_object(data):
+    if not isPlainObject(data):
         raise ValidationError(f"expected object but got {data}", options)
     result: dict[str, Any] = {}
     for key in list(data.keys()):
@@ -981,7 +982,7 @@ def _resolve_object(
     options: Options,
     strict: bool,
 ) -> tuple[Any, None]:
-    if not is_plain_object(data):
+    if not isPlainObject(data):
         raise ValidationError(f"expected object but got {data}", options)
     result: dict[str, Any] = {}
     for key, inner in (schema.dict or {}).items():
@@ -1003,7 +1004,7 @@ def _resolve_object(
         else:
             if adapted is not None:
                 data[key] = adapted
-        if not is_nullable(value) or key in data:
+        if not isNullable(value) or key in data:
             result[key] = value
     if not strict:
         _merge(result, data)
@@ -1039,9 +1040,9 @@ def _resolve_intersect(
     result: Any = None
     for inner in list_:
         value, _ = Schema.resolve(data, inner, options, True)  # type: ignore[attr-defined]
-        if is_nullable(value):
+        if isNullable(value):
             continue
-        if is_nullable(result):
+        if isNullable(result):
             result = value
         elif type(result) is not type(value):
             raise ValidationError(
@@ -1053,7 +1054,7 @@ def _resolve_intersect(
             raise ValidationError(
                 f"expected {schema.to_string()} but got {_safe_json(data)}", options
             )
-    if not strict and is_plain_object(data):
+    if not strict and isPlainObject(data):
         _merge(result or {}, data)
     return (result, None)
 
