@@ -30,6 +30,7 @@ taiyi-core-scope = { workspace = true }
 taiyi-core-session = { workspace = true }
 taiyi-loader = { workspace = true }
 taiyi-group = { workspace = true }
+taiyi-include = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
