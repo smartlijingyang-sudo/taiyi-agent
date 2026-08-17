@@ -164,7 +164,7 @@ class Context:
         from cordis.fiber import Fiber
 
         # Install the root Fiber attached to this context.
-        self.fiber: Fiber = Fiber(self, {}, {}, None, _capture_outer())
+        self.fiber: Fiber = Fiber(self, {}, {}, None, _capture_outer(), is_root=True)
 
         from cordis.reflect import ReflectService
         from cordis.registry import RegistryService

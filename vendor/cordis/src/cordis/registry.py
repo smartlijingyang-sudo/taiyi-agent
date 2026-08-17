@@ -199,14 +199,20 @@ class RegistryService:
             name = getattr(plugin, "name", None)
             if name == "apply":
                 name = None
+            runtime_config = getattr(plugin, "Config", None)
+            if runtime_config is None and isinstance(plugin, dict):
+                runtime_config = plugin.get("Config")
             runtime = PluginRuntime(
                 name=name,
                 callback=callback,
-                Config=getattr(plugin, "Config", None),
+                Config=runtime_config,
             )
             self._internal[callback] = runtime
 
-        inject = Inject_resolve(getattr(plugin, "inject", None))
+        inject_value = getattr(plugin, "inject", None)
+        if inject_value is None and isinstance(plugin, dict):
+            inject_value = plugin.get("inject")
+        inject = Inject_resolve(inject_value)
         outer = get_outer_stack or build_outer_stack(0)
         fiber = Fiber(
             self.ctx,

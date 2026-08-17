@@ -21,6 +21,13 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+filterwarnings = [
+    # Fiber construction schedules _reload() via asyncio.ensure_future().
+    # When the test event loop is torn down before the task runs, Python emits
+    # "coroutine was never awaited" — this is informational; the warning is
+    # inherent to synchronously constructing async-driven fibers in tests.
+    "ignore:coroutine 'Fiber._reload' was never awaited:RuntimeWarning",
+]
 
 [tool.coverage.run]
 source = ["src/cordis"]

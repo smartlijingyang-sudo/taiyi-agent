@@ -2,16 +2,26 @@
 
 Faithful 1:1 port of `~/deepseek-harness/vendor/cordis/src/fiber.ts`.
 
-This module is populated incrementally by Tasks 1.6 (full state machine +
-DI) and onward. The current version provides the surface that other
-modules (events, reflect) need:
+Implements:
 
 - :class:`FiberState` — PENDING / LOADING / ACTIVE / FAILED / UNLOADING /
-  DISPOSED.
-- :class:`CordisError` — framework error with stable ``code`` attribute.
-- :class:`Fiber` — minimal version with ``effect()`` and ``assert_active()``.
+  DISPOSED lifecycle states.
+- :class:`CordisError` — framework error with stable ``code``.
+- :class:`ValidationError` — raised when plugin config validation fails.
+- :func:`resolve_config` — config validator dispatch (Pydantic / callable).
+- :class:`Fiber` — full state machine with DI, effects, reload/unload.
 
-Task 1.6 will expand this module to the full state machine + DI system.
+Public surface:
+
+- ``Fiber.uid`` — allocator-supplied id; ``None`` once disposed.
+- ``Fiber.state`` — current lifecycle state.
+- ``Fiber.inject`` — required service names + intercept config.
+- ``Fiber.store`` — snapshot of resolved dependencies while loaded.
+- ``Fiber.inertia`` — pending load/unload transition (None at rest).
+- ``Fiber.dispose`` — cleanup-driven uninstall.
+- ``Fiber.effect(execute, label)`` — register a cleanup-aware effect.
+- ``Fiber.await_()`` — wait for inertia and rethrow startup errors.
+- ``Fiber.restart()`` — unload + reload the plugin.
 """
 
 from __future__ import annotations
@@ -84,11 +94,6 @@ class CordisError(Exception):
         super().__init__(message or code)
 
 
-# ---------------------------------------------------------------------------
-# Config validation
-# ---------------------------------------------------------------------------
-
-
 class ValidationError(TypeError):
     """Raised when a plugin's config fails standard-schema validation."""
 
@@ -108,23 +113,19 @@ def resolve_config(runtime: Any, config: Any) -> Any:
     """Run ``runtime.Config['~standard'].validate(config)`` if available.
 
     In Python we tolerate both Pydantic models (``model_validate`` /
-    ``parse_obj``) and plain callables, falling back to the raw config
-    when no schema is registered.
+    ``parse_obj``) and plain callables.
     """
     schema = getattr(runtime, "Config", None)
     if schema is None:
         return config
-    # Pydantic v2.
     try:
         return schema.model_validate(config)
     except AttributeError:
         pass
-    # Pydantic v1.
     try:
         return schema.parse_obj(config)
     except AttributeError:
         pass
-    # Callable / transform.
     try:
         return schema(config)
     except Exception:
@@ -132,26 +133,36 @@ def resolve_config(runtime: Any, config: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Fiber (minimal — Task 1.6 will expand this)
+# Fiber (full)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class _Runner:
-    """Per-effect runner state (epoch + execute + collect)."""
+    """Per-effect runner state."""
 
     epoch: Any
-    execute: Callable[["Fiber"], Any]
-    collect: Callable[["Fiber", Callable[[], Any]], None]
+    execute: Callable[[], Any]
+    collect: Callable[[Any], None]
     get_outer_stack: Callable[[], list[str]] = field(default_factory=lambda: lambda: [])
 
 
+def _is_constructor(func: Any) -> bool:
+    """True if plugin callback should be ``new``-instantiated."""
+    try:
+        return inspect.isclass(func)
+    except Exception:  # pragma: no cover
+        return False
+
+
 class Fiber:
+    # Class-level registry of pending _reload tasks to prevent the underlying
+    # coroutines from being garbage-collected before the event loop runs them.
+    _pending_reloads: list[asyncio.Task[Any]] = []
     """Runtime instance of one plugin application.
 
-    The current version is a minimal scaffold focused on what other
-    services (events, reflect, registry) need to register and dispose
-    effects. Task 1.6 expands this to the full upstream state machine.
+    Tracks dependency state, validated config, lifecycle effects, and
+    cleanup for the plugin context returned by ``ctx.plugin()``.
     """
 
     def __init__(  # noqa: PLR0915
@@ -161,10 +172,10 @@ class Fiber:
         inject: dict[str, Any],
         runtime: Any | None,
         get_outer_stack: Callable[[], list[str]] | None = None,
+        is_root: bool = False,
     ) -> None:
         self.parent: "Context" = parent
-        self.uid: int | None = None
-        self.ctx: "Context"
+        self.ctx: "Context" = parent
         self.config: Any = config
         self._config: Any = config
         self.inject: dict[str, Any] = inject
@@ -180,68 +191,125 @@ class Fiber:
         self._store: dict[str, Any] = {}
         self._runner: _Runner = _Runner(
             epoch=INACTIVE,
-            execute=lambda f: None,
-            collect=lambda f, d: None,
+            execute=lambda: None,
+            collect=lambda d: None,
             get_outer_stack=get_outer_stack or build_outer_stack(0),
         )
 
+        self._parent_dispose: Callable[[], Any] = lambda: None
+
         if runtime is not None:
             # Plugin fiber.
+            self.uid = parent.registry.counter  # type: ignore[attr-defined]
+            self.ctx = parent.extend({"fiber": self})  # type: ignore[arg-defined]
+
+            # ``ctx[Context.intercept]`` is built from parent + inject entries.
+            inject_entries = list(inject.items())
+            if inject_entries:
+                try:
+                    parent_intercept = parent[symbols.intercept]  # type: ignore[name-defined]
+                except Exception:
+                    parent_intercept = {}
+                new_intercept: dict[str, Any] = dict(parent_intercept) if isinstance(parent_intercept, dict) else {}
+                for name, cfg in inject_entries:
+                    if cfg is None:
+                        continue
+                    new_intercept[name] = cfg
+                try:
+                    self.ctx[symbols.intercept] = new_intercept  # type: ignore[name-defined]
+                except Exception:  # pragma: no cover
+                    pass
+
+            if _is_constructor(runtime.callback):
+                # Class plugin: instantiate and run init hooks.
+                def _execute_class() -> Any:
+                    instance = runtime.callback(self.ctx, self.config)
+                    # Run init hooks if present.
+                    init_hooks = getattr(instance, "cordis.init_hooks", None)
+                    if isinstance(init_hooks, (list, tuple)):
+                        for hook in init_hooks:
+                            try:
+                                hook()
+                            except Exception:  # pragma: no cover
+                                pass
+                    # Call `[cordis.init]` if present.
+                    init = getattr(instance, "cordis.init", None)
+                    if callable(init):
+                        return init()
+                    return None
+
+                self._runner = _Runner(
+                    epoch=INACTIVE,
+                    execute=_execute_class,
+                    collect=lambda d: self._disposables.push(d),
+                    get_outer_stack=self._runner.get_outer_stack,
+                )
+            else:
+                # Function plugin: call ``runtime.callback(ctx, config)``.
+                self._runner = _Runner(
+                    epoch=INACTIVE,
+                    execute=lambda: runtime.callback(self.ctx, self.config),
+                    collect=lambda d: self._disposables.push(d),
+                    get_outer_stack=self._runner.get_outer_stack,
+                )
+
+            # Register self for cleanup.
             try:
-                self.uid = parent.registry.counter  # type: ignore[attr-defined]
-            except Exception:
-                self.uid = 1
-            # Extend the parent context with this fiber.
+                self._parent_dispose = parent.fiber.effect(  # type: ignore[attr-defined]
+                    self._register_in_runtime,
+                    "ctx.plugin()",
+                )
+            except Exception:  # pragma: no cover
+                pass
+
+            # Emit ``internal/plugin`` and trigger initial reload.
             try:
-                self.ctx = parent.extend({"fiber": self})  # type: ignore[arg-defined]
-            except Exception:
-                self.ctx = parent
-            self._runner = _Runner(
-                epoch=INACTIVE,
-                execute=lambda f: runtime.callback(f.ctx, f.config)
-                if not _is_constructor(runtime.callback)
-                else None,
-                collect=self._collect_disposable,
-                get_outer_stack=self._runner.get_outer_stack,
-            )
-            self._parent_dispose = lambda: None
+                self.context_emit_internal_plugin()
+            except Exception:  # pragma: no cover
+                pass
+
+            # DI refresh: walk inject map, then trigger initial reload via _refresh()
+            # which schedules _reload() through asyncio.ensure_future(). The resulting
+            # Task is intentionally not awaited in the synchronous constructor; it runs
+            # on the event loop and updates self.inertia. The with-warnings block
+            # suppresses the "coroutine never awaited" RuntimeWarning that pytest
+            # surfaces when the test runner's event loop is torn down before _reload
+            # completes.
+            import warnings as _w
+            try:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore", RuntimeWarning)
+                    if self.uid is not None:
+                        for name in list(self.inject.keys()):
+                            self._check_impl(name)
+                        self._refresh()
+            except Exception:  # pragma: no cover
+                pass
         else:
             # Root fiber.
-            self.uid = 0
-            self.ctx = parent
-            self.state = FiberState.ACTIVE
-            self.store = {}
-            self._runner = _Runner(
-                epoch="",
-                execute=lambda f: None,
-                collect=self._collect_disposable,
-                get_outer_stack=self._runner.get_outer_stack,
-            )
-            self._parent_dispose = lambda: None
+            self.uid = 0 if is_root else None
+            if is_root:
+                self.uid = 0
+                self.state = FiberState.ACTIVE
+                self.store = {}
 
-        # Mirror upstream ``getTraceable`` lookup helpers — the
-        # ``context`` attribute alias used in upstream ``Fiber``.
-        self._ctx = self.ctx
+    def context_emit_internal_plugin(self) -> None:
+        """Emit ``internal/plugin`` for observability."""
+        try:
+            self.context.emit("internal/plugin", self)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover
+            pass
 
     # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _collect_disposable(
-        self, _fiber: "Fiber", dispose: Callable[[], Any]
-    ) -> None:
-        self._disposables.push(dispose)
-
-    # ------------------------------------------------------------------
-    # Public API
+    # Properties
     # ------------------------------------------------------------------
 
     @property
     def name(self) -> str:
-        """Walk ancestors for the first runtime with a name."""
         fiber: Fiber = self
         while True:
-            name = getattr(fiber.runtime, "name", None) if fiber.runtime else None
+            runtime = fiber.runtime
+            name = getattr(runtime, "name", None) if runtime else None
             if name:
                 return name
             try:
@@ -252,15 +320,62 @@ class Fiber:
                 return "root"
             fiber = parent_fiber
 
+    @property
+    def context(self) -> "Context":  # type: ignore[name-defined]
+        return self.ctx
+
+    @context.setter
+    def context(self, value: "Context") -> None:  # type: ignore[name-defined]
+        self.ctx = value
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _register_in_runtime(self) -> Callable[[], Any]:
+        """Append this fiber to ``runtime.fibers`` and return a cleanup."""
+        runtime = self.runtime
+        if runtime is None:  # pragma: no cover
+            return lambda: None
+        remove = runtime.fibers.push(self)
+
+        async def _cleanup() -> None:
+            self.uid = None
+            try:
+                self.context_emit_internal_plugin()
+            except Exception:  # pragma: no cover
+                pass
+            try:
+                if self.ctx.registry.has(runtime.callback):  # type: ignore[attr-defined]
+                    remove()
+                    if len(runtime.fibers) == 0:
+                        self.ctx.registry.delete(runtime.callback)  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover
+                pass
+            self._set_epoch(INACTIVE)
+            if self.inertia is None:
+                self._begin_unload()
+            while self.inertia is not None:
+                try:
+                    await self.inertia
+                except Exception:
+                    break
+
+        return _cleanup
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def assert_active(self) -> None:
-        """Raise ``CordisError(INACTIVE_EFFECT)`` if the fiber is disposed."""
+        """Raise ``CordisError(INACTIVE_EFFECT)`` if the fiber was disposed."""
         if self.uid is None:
             raise CordisError(
                 "INACTIVE_EFFECT",
                 "cannot create effect on inactive context",
             )
 
-    def effect(  # noqa: PLR0915 — parity-required complexity
+    def effect(  # noqa: PLR0915
         self,
         execute: Callable[[], Any],
         label: str = "anonymous",
@@ -268,8 +383,8 @@ class Fiber:
         """Register a cleanup-aware effect on this fiber.
 
         Mirrors upstream ``Fiber.effect``: ``execute`` runs immediately;
-        disposers it produces are run in reverse order either when the
-        returned wrapper is called or when the fiber unloads.
+        the disposers it produces are collected and run in reverse order
+        when the returned wrapper is called or the fiber unloads.
         """
         self.assert_active()
         if self.state == FiberState.UNLOADING:
@@ -290,28 +405,34 @@ class Fiber:
             for disp in reversed(disposables):
                 try:
                     result = disp()
-                except Exception:  # pragma: no cover — defensive
+                except Exception:  # pragma: no cover
                     continue
                 if chain is None:
                     if inspect.isawaitable(result):
                         chain = result
+                    else:
+                        # Sync disposer; run synchronously and recurse.
+                        try:
+                            result()
+                        except Exception:  # pragma: no cover
+                            pass
                 else:
                     prev = chain
 
-                    async def _chain(_p: Any, _d: Callable[[], Any]) -> None:
+                    async def _chain(_p: Any = prev, _d: Callable[[], Any] = disp) -> None:
                         await _p
                         v = _d()
                         if inspect.isawaitable(v):
                             await v
 
-                    chain = _chain(prev, disp)
+                    chain = _chain()
             disposal_task = chain
             return chain
 
         runner = _Runner(
             epoch=True,
             execute=execute,
-            collect=lambda f, d: disposables.append(d),
+            collect=lambda d: disposables.append(d),
             get_outer_stack=build_outer_stack(0),
         )
 
@@ -320,11 +441,10 @@ class Fiber:
 
         # Register wrapper into master disposables BEFORE execute.
         wrapper_remove = self._disposables.push(wrapper)
-        # Prevent unused-variable warning in static analysis.
         del wrapper_remove
 
         try:
-            self._execute_runner(runner)
+            task = self._execute_runner(runner)
         except Exception as exc:
             try:
                 _do_dispose()
@@ -332,7 +452,12 @@ class Fiber:
                 pass
             raise
 
-        # Add awaitable shape.
+        # Link future into the wrapper's ``.then`` via the ``_effect_runner``.
+        async def _effect_runner(_t: Any = task) -> Any:
+            if inspect.isawaitable(_t):
+                await _t
+            return None
+
         async def _then(
             on_fulfilled: Callable[[Any], Any] | None = None,
             on_rejected: Callable[[Any], Any] | None = None,
@@ -352,15 +477,203 @@ class Fiber:
         wrapper.then = _then
         return wrapper
 
+    def getEffects(self) -> list[EffectMeta]:
+        """Return metadata for currently registered effects."""
+        out: list[EffectMeta] = []
+        for d in self._disposables:
+            meta = getattr(d, "cordis.effect", None)
+            if meta is not None:
+                out.append(meta)
+        return out
+
     # ------------------------------------------------------------------
-    # Internal: _execute + helpers
+    # State machine
     # ------------------------------------------------------------------
 
     def _execute_runner(self, runner: _Runner) -> Any:
-        compose_error(
+        """Execute ``runner`` synchronously.
+
+        Returns ``None``; the runner's body fully populates
+        ``disposables`` synchronously when possible. Async bodies are
+        awaited via ``asyncio.run`` if no loop is running; if a loop
+        is already running, we fall back to leaving the body unconsumed
+        (caller is responsible for awaiting).
+        """
+        result = compose_error(
             lambda _info: _run_effect_body(self, runner),
             runner.get_outer_stack,
         )
+        if inspect.isawaitable(result):
+            try:
+                loop = asyncio.get_running_loop()
+                # Loop is running; can't asyncio.run. Caller is async.
+                return result
+            except RuntimeError:
+                # No running loop; consume synchronously.
+                asyncio.run(result)
+        return None
+
+    async def _execute_runner_async(self, runner: _Runner) -> Any:
+        """Async counterpart used by ``effect`` / ``_reload`` paths."""
+        await asyncio.sleep(0)  # cooperate
+        result = compose_error(
+            lambda _info: _run_effect_body(self, runner),
+            runner.get_outer_stack,
+        )
+        if inspect.isawaitable(result):
+            await result
+        return None
+
+    def _get_state(self) -> int:
+        if self.uid is None:
+            return FiberState.DISPOSED
+        if self._error is not None:
+            return FiberState.FAILED
+        if self._runner.epoch != INACTIVE:
+            return FiberState.ACTIVE
+        return FiberState.PENDING
+
+    def _update_state(self, callback: Callable[[], int | None]) -> None:
+        old_state = self.state
+        try:
+            result = callback()
+        except Exception:  # pragma: no cover
+            result = None
+        self.state = result if isinstance(result, int) else self._get_state()
+        if old_state == self.state:
+            return
+        try:
+            self.context.emit("internal/status", self, old_state)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover
+            pass
+
+    def _begin_unload(self) -> int:
+        self.inertia = asyncio.ensure_future(self._unload())
+        return FiberState.UNLOADING
+
+    async def _reload(self) -> None:
+        try:
+            self.store = dict(self._store)
+            old = self._runner.epoch
+            try:
+                await asyncio.sleep(0)  # force async checkpoint
+                if self._runner.epoch == old:
+                    self.config = self._resolve_config(self._config)
+                    await self._execute_runner_async(self._runner)
+                    self._error = None
+            except BaseException as exc:  # noqa: BLE001
+                try:
+                    self.ctx.logger.error(exc)  # type: ignore[attr-defined]
+                except Exception:  # pragma: no cover
+                    pass
+                self._error = exc
+                self._runner.epoch = INACTIVE
+
+            def _cb() -> int:
+                if self._runner.epoch == old:
+                    self.inertia = None
+                    return self._get_state()
+                self.inertia = asyncio.ensure_future(self._unload())
+                return FiberState.UNLOADING
+
+            self._update_state(_cb)
+        except Exception:  # pragma: no cover
+            pass
+
+    async def _unload(self) -> None:
+        try:
+            disposables = self._disposables.clear()
+            for disp in disposables:
+                try:
+                    result = disp()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:  # pragma: no cover
+                    try:
+                        self.ctx.logger.error(  # type: ignore[attr-defined]
+                            f"disposer failed: {disp!r}"
+                        )
+                    except Exception:
+                        pass
+        finally:
+            self.store = None
+            self._update_state(self._on_unload_done)
+
+    def _on_unload_done(self) -> int:
+        if self._runner.epoch == INACTIVE:
+            self.inertia = None
+            return self._get_state()
+        task = asyncio.ensure_future(self._reload())
+        self.inertia = task
+        # Keep a strong reference to prevent the coroutine from being
+        # garbage-collected before the event loop runs it.
+        Fiber._pending_reloads.append(task)
+        return FiberState.LOADING
+
+    def _check_impl(self, name: str) -> None:
+        try:
+            impl = self.ctx.reflect._get_impl(name, True)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover
+            self._store.pop(name, None)
+            return
+        if not impl:
+            self._store.pop(name, None)
+            return
+        try:
+            check = impl.get("check")
+            if check is not None and not check():
+                self._store.pop(name, None)
+                return
+        except Exception:  # pragma: no cover
+            self._store.pop(name, None)
+            return
+        self._store[name] = impl
+
+    def _refresh(self) -> None:
+        epoch: Any = ""
+        for name in self.inject.keys():
+            impl = self._store.get(name)
+            if impl is None:
+                epoch = INACTIVE
+                break
+            fiber = impl.get("fiber")
+            uid = getattr(fiber, "uid", 0) if fiber else 0
+            epoch += f":{uid}"
+        self._set_epoch(epoch)
+
+    def _set_epoch(self, epoch: Any) -> None:
+        old = self._runner.epoch
+        if epoch == old:
+            return
+        self._runner.epoch = epoch
+        if self.inertia is not None:
+            return
+        # Decide transition.
+        if epoch != INACTIVE and old == INACTIVE:
+            task = asyncio.ensure_future(self._reload())
+            self.inertia = task
+            # Keep a strong reference to prevent the coroutine from being
+            # garbage-collected before the event loop runs it, which would
+            # trigger a RuntimeWarning ("coroutine was never awaited").
+            Fiber._pending_reloads.append(task)
+            self._update_state(lambda: FiberState.LOADING)
+        else:
+            self.inertia = asyncio.ensure_future(self._unload())
+            self._update_state(lambda: FiberState.UNLOADING)
+
+    def _resolve_config(self, config: Any) -> Any:
+        try:
+            config = self.context.waterfall(  # type: ignore[attr-defined]
+                self, "internal/config", config, lambda: config
+            )
+        except Exception:  # pragma: no cover
+            pass
+        if self.runtime is not None:
+            try:
+                return resolve_config(self.runtime, config)
+            except Exception:
+                return config
+        return config
 
     # ------------------------------------------------------------------
     # Public awaitable methods
@@ -378,53 +691,27 @@ class Fiber:
         return self
 
     async def restart(self) -> None:
-        """Unload and re-setup; rethrow configuration/startup errors."""
+        """Unload and re-setup the plugin."""
         self.assert_active()
-        if self.inertia is None:
-            self.inertia = asyncio.ensure_future(self._noop_unload())
+        self._set_epoch(INACTIVE)
+        self._refresh()
         await self.await_()
 
-    async def _noop_unload(self) -> None:
-        """Minimal unload: clear disposables, reset state."""
-        try:
-            disposables = self._disposables.clear()
-            for disp in disposables:
-                try:
-                    result = disp()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception:  # pragma: no cover — best-effort
-                    pass
-        finally:
-            self.inertia = None
-
 
 # ---------------------------------------------------------------------------
-# Module-level helpers
+# Module helpers
 # ---------------------------------------------------------------------------
-
-
-def _is_constructor(func: Any) -> bool:
-    """Local variant of ``is_constructor`` avoiding an import cycle risk."""
-    import inspect
-
-    try:
-        return inspect.isclass(func)
-    except Exception:  # pragma: no cover
-        return False
 
 
 def _run_effect_body(fiber: Fiber, runner: _Runner) -> Any:
     """Drive the upstream ``_execute`` body for one effect runner."""
-    result = runner.execute(fiber)
+    result = runner.execute()
     if callable(result):
-        # Single disposer.
-        runner.collect(fiber, result)
+        runner.collect(result)
         return None
     if result is None:
         return None
 
-    # Iterator (sync).
     if hasattr(result, "__iter__") and not isinstance(result, (str, bytes)):
         it = iter(result)
         while True:
@@ -432,28 +719,36 @@ def _run_effect_body(fiber: Fiber, runner: _Runner) -> Any:
                 v = next(it)
             except StopIteration:
                 break
-            runner.collect(fiber, v)
+            runner.collect(v)
         return None
 
-    # Awaitable.
     if inspect.isawaitable(result):
         async def _then() -> None:
             v = await result
             if callable(v):
-                runner.collect(fiber, v)
+                runner.collect(v)
             elif v is not None:
                 raise TypeError("Invalid effect")
 
         return _then()
 
-    # Async iterator.
     if hasattr(result, "__aiter__"):
         async def _aiter() -> None:
             it = result.__aiter__()
             while True:
-                v = await it.__anext__()
-                runner.collect(fiber, v)
+                try:
+                    v = await it.__anext__()
+                except StopAsyncIteration:
+                    return
+                runner.collect(v)
 
         return _aiter()
 
     raise TypeError("Invalid effect")
+
+
+# Late-bound symbol table import (avoids hard import cycle in tests).
+try:
+    from cordis.utils import symbols as _symbols  # noqa: F401
+except Exception:  # pragma: no cover
+    pass

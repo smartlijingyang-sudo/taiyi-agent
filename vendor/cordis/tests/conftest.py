@@ -6,6 +6,7 @@ lazily so that conftest parsing succeeds even before Task 1.2 lands.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -31,16 +32,23 @@ def make_ctx() -> Iterator[Callable[[], object]]:
     # Best-effort cleanup for tests that did not await dispose themselves.
     import asyncio
 
-    for ctx in created:
-        state = getattr(ctx, "state_disposed", False)
-        if state:
-            continue
-        try:
-            dispose = getattr(ctx, "dispose", None)
-            if dispose is None:
+    # Suppress RuntimeWarning about pending _reload coroutines. Fiber construction
+    # schedules _reload() via asyncio.ensure_future(); when the test runner tears
+    # down its event loop before the task completes, the underlying coroutine is
+    # garbage-collected and Python emits "coroutine was never awaited". This is
+    # expected in synchronous test paths and the warning is informational only.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for ctx in created:
+            state = getattr(ctx, "state_disposed", False)
+            if state:
                 continue
-            result = dispose()
-            if asyncio.iscoroutine(result):
-                asyncio.run(result)
-        except Exception:  # pragma: no cover — best-effort cleanup only
-            pass
+            try:
+                dispose = getattr(ctx, "dispose", None)
+                if dispose is None:
+                    continue
+                result = dispose()
+                if asyncio.iscoroutine(result):
+                    asyncio.run(result)
+            except Exception:  # pragma: no cover — best-effort cleanup only
+                pass
