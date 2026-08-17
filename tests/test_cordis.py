@@ -130,9 +130,9 @@ async def test_waterfall_chains_in_order():
 
     await ctx.plugin(setup, {})
     out = await ctx.emit("wf", 1)
-    # 1 -> +1 -> *10 -> final
-    assert out == 10
-    assert log == ["final:10"]
+    # 1 -> +1=2 -> *10=20 -> final:20
+    assert out == 20
+    assert log == ["final:20"]
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Awaitable, Callable, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from .errors import LLMError, LLMNetworkError, LLMRateLimitError
 

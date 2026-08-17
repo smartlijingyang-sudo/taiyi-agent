@@ -1,0 +1,12 @@
+{
+  "name": "taiyi-profile-base",
+  "private": true,
+  "dependencies": {},
+  "taiyi": {
+    "profile": {
+      "bundles": [
+        "taiyi-bundle-base"
+      ]
+    }
+  }
+}

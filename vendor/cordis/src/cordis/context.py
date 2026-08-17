@@ -345,6 +345,8 @@ class Context:
 
         next 链构造（递归）：
           make_next(i) -> async fn(value) -> listener[i](value, make_next(i+1))
+        
+        如果监听器不调用 next()，返回传入该监听器的值（veto 语义）。
         """
         async def make_next(idx: int):
             if idx >= len(listeners):
@@ -356,9 +358,23 @@ class Context:
             inner = await make_next(idx + 1)
 
             async def call_with(value: Any) -> Any:
-                ret = listener(value, inner)
+                # 追踪是否调用了 next
+                next_called = False
+                next_value = value
+                
+                async def wrapped_next(v: Any) -> Any:
+                    nonlocal next_called, next_value
+                    next_called = True
+                    next_value = await inner(v)
+                    return next_value
+                
+                ret = listener(value, wrapped_next)
                 if inspect.iscoroutine(ret):
                     ret = await ret
+                
+                # 如果没有调用 next，返回传入的值
+                if not next_called:
+                    return value
                 return ret
 
             return call_with

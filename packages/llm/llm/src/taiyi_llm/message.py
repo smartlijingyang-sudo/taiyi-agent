@@ -10,7 +10,8 @@ provider-neutral 字符串（system | user | assistant | tool）。辅助 tool �
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 # Canonical role vocabulary。Merged from dsh-llm/message.ts：dsh 只暴露
 # system | user | assistant；taiyi 在 MVP 增加 `tool`（用于 OpenAI 兼容的
@@ -34,17 +35,17 @@ class Message(dict):
     # ---- factories ------------------------------------------------------
 
     @staticmethod
-    def system(text: str) -> "Message":
+    def system(text: str) -> Message:
         """System instruction message; 出现在 messages 列表最前。"""
         return Message({"role": ROLE_SYSTEM, "content": text})
 
     @staticmethod
-    def user(text: str | list[Any]) -> "Message":
+    def user(text: str | list[Any]) -> Message:
         """User turn；`text` 可为字符串或 content block 列表。"""
         return Message({"role": ROLE_USER, "content": text})
 
     @staticmethod
-    def assistant(text: str | None) -> "Message":
+    def assistant(text: str | None) -> Message:
         """纯文本 assistant reply；如要携带 tool_calls 请用 `assistant_tool_calls`。"""
         return Message({"role": ROLE_ASSISTANT, "content": text})
 
@@ -52,7 +53,7 @@ class Message(dict):
     def assistant_tool_calls(
         tool_calls: list[dict],
         content: str | None = None,
-    ) -> "Message":
+    ) -> Message:
         """Assistant turn 携带 tool calls。
 
         每项形如 `{"id": "call_xxx", "type": "function",
@@ -71,7 +72,7 @@ class Message(dict):
         )
 
     @staticmethod
-    def tool_result(tool_call_id: str, text: str) -> "Message":
+    def tool_result(tool_call_id: str, text: str) -> Message:
         """Tool execution result，对应之前 assistant turn 中的某个 tool_call_id。
 
         把结果以 `role: "tool"` 形式塞回 messages，模型在下一轮可看到。

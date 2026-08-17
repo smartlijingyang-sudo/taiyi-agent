@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---- canonical error codes (route on these, never on message) ---------
 
 CODE_AUTH = "AUTH"
@@ -190,7 +189,7 @@ class LLMResponse:
         return out
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "LLMResponse":
+    def from_dict(cls, payload: dict[str, Any]) -> LLMResponse:
         return cls(
             content=str(payload.get("content", "")),
             tool_calls=list(payload.get("tool_calls") or []),

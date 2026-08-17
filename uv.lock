@@ -17,11 +17,15 @@ members = [
     "taiyi-core-system-prompt",
     "taiyi-core-tools",
     "taiyi-cosmokit",
+    "taiyi-group",
     "taiyi-host-webserver",
     "taiyi-llm",
     "taiyi-llm-deepseek",
     "taiyi-llm-retry",
+    "taiyi-loader",
+    "taiyi-logger-console",
     "taiyi-schemastery",
+    "taiyi-timer",
     "taiyi-web",
 ]
 
@@ -496,11 +500,15 @@ dependencies = [
     { name = "taiyi-core-system-prompt" },
     { name = "taiyi-core-tools" },
     { name = "taiyi-cosmokit" },
+    { name = "taiyi-group" },
     { name = "taiyi-host-webserver" },
     { name = "taiyi-llm" },
     { name = "taiyi-llm-deepseek" },
     { name = "taiyi-llm-retry" },
+    { name = "taiyi-loader" },
+    { name = "taiyi-logger-console" },
     { name = "taiyi-schemastery" },
+    { name = "taiyi-timer" },
     { name = "taiyi-web" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -530,11 +538,15 @@ requires-dist = [
     { name = "taiyi-core-system-prompt", editable = "packages/core/system-prompt" },
     { name = "taiyi-core-tools", editable = "packages/core/tools" },
     { name = "taiyi-cosmokit", editable = "vendor/cosmokit" },
+    { name = "taiyi-group", editable = "vendor/group" },
     { name = "taiyi-host-webserver", editable = "packages/host/webserver" },
     { name = "taiyi-llm", editable = "packages/llm/llm" },
     { name = "taiyi-llm-deepseek", editable = "packages/llm/llm-deepseek" },
     { name = "taiyi-llm-retry", editable = "packages/llm/llm-retry" },
+    { name = "taiyi-loader", editable = "vendor/loader" },
+    { name = "taiyi-logger-console", editable = "vendor/logger-console" },
     { name = "taiyi-schemastery", editable = "vendor/schemastery" },
+    { name = "taiyi-timer", editable = "vendor/timer" },
     { name = "taiyi-web", editable = "packages/web" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
@@ -751,6 +763,21 @@ version = "1.0.0"
 source = { editable = "vendor/cosmokit" }
 
 [[package]]
+name = "taiyi-group"
+version = "1.0.0"
+source = { editable = "vendor/group" }
+dependencies = [
+    { name = "taiyi-cordis" },
+    { name = "taiyi-loader" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "taiyi-cordis", editable = "vendor/cordis" },
+    { name = "taiyi-loader", editable = "vendor/loader" },
+]
+
+[[package]]
 name = "taiyi-host-webserver"
 version = "0.1.0"
 source = { editable = "packages/host/webserver" }
@@ -813,6 +840,36 @@ dependencies = [
 requires-dist = [{ name = "taiyi-llm", editable = "packages/llm/llm" }]
 
 [[package]]
+name = "taiyi-loader"
+version = "1.0.0"
+source = { editable = "vendor/loader" }
+dependencies = [
+    { name = "taiyi-cordis" },
+    { name = "taiyi-cosmokit" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "taiyi-cordis", editable = "vendor/cordis" },
+    { name = "taiyi-cosmokit", editable = "vendor/cosmokit" },
+]
+
+[[package]]
+name = "taiyi-logger-console"
+version = "1.0.0"
+source = { editable = "vendor/logger-console" }
+dependencies = [
+    { name = "taiyi-cordis" },
+    { name = "taiyi-cosmokit" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "taiyi-cordis", editable = "vendor/cordis" },
+    { name = "taiyi-cosmokit", editable = "vendor/cosmokit" },
+]
+
+[[package]]
 name = "taiyi-schemastery"
 version = "1.0.0"
 source = { editable = "vendor/schemastery" }
@@ -822,6 +879,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.6" }]
+
+[[package]]
+name = "taiyi-timer"
+version = "1.0.0"
+source = { editable = "vendor/timer" }
+dependencies = [
+    { name = "taiyi-cordis" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "taiyi-cordis", editable = "vendor/cordis" }]
 
 [[package]]
 name = "taiyi-web"

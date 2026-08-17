@@ -1,0 +1,36 @@
+# The taiyi-base bundle patch: the shared core of every taiyi profile.
+# Applied as ONE insert over the empty profile root.
+
+- insert:
+    # Core services
+    - id: sessions
+      name: taiyi_core_sessions.plugin:setup
+
+    - id: system-prompt
+      name: taiyi_core_system_prompt.plugin:setup
+
+    - id: tools
+      name: taiyi_core_tools.plugin:setup
+
+    - id: agents
+      name: taiyi_core_agent.plugin:setup
+
+    - id: agent-loop
+      name: taiyi_core_agent_loop.plugin:setup
+
+    # LLM services
+    - id: llm
+      name: taiyi_llm.plugin:setup
+
+    - id: llm-deepseek
+      name: taiyi_llm_deepseek.plugin:setup
+      config:
+        api_key: ${DEEPSEEK_API_KEY}
+        base_url: ${DEEPSEEK_BASE_URL}
+
+    - id: llm-retry
+      name: taiyi_llm_retry.plugin:setup
+      config:
+        wrap: ["deepseek"]
+        max_retries: 3
+        backoff: 1.0

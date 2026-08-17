@@ -152,7 +152,7 @@ class StreamChunk:
         return out
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "StreamChunk":
+    def from_dict(cls, payload: dict[str, Any]) -> StreamChunk:
         """Deserialize from a dict; `id` / `tool_call_id` 都接受。"""
         tool_call_id = payload.get("tool_call_id")
         if tool_call_id is None:
@@ -175,7 +175,7 @@ class StreamChunk:
     # ---- convenience constructors / predicates ---------------------------
 
     @classmethod
-    def content(cls, delta: str, **extra: Any) -> "StreamChunk":
+    def content(cls, delta: str, **extra: Any) -> StreamChunk:
         """Build a content delta chunk; `delta` 是这一批的 token / 字符增量。"""
         return cls(type=CHUNK_CONTENT, delta=delta, **extra)
 
@@ -187,7 +187,7 @@ class StreamChunk:
         arguments: dict[str, Any] | str | None = None,
         *,
         index: int = 0,
-    ) -> "StreamChunk":
+    ) -> StreamChunk:
         """Build a finalized tool_call chunk."""
         if isinstance(arguments, str):
             import json as _json
@@ -207,11 +207,11 @@ class StreamChunk:
         )
 
     @classmethod
-    def done(cls, *, finish_reason: str = FINISH_STOP) -> "StreamChunk":
+    def done(cls, *, finish_reason: str = FINISH_STOP) -> StreamChunk:
         return cls(type=CHUNK_DONE, finish_reason=finish_reason)
 
     @classmethod
-    def error(cls, message: str) -> "StreamChunk":
+    def error(cls, message: str) -> StreamChunk:
         return cls(type=CHUNK_ERROR, error=message)
 
     # ---- predicates ------------------------------------------------------

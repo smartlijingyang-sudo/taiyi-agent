@@ -41,12 +41,12 @@ async def test_run_turn_emits_chunks():
     async for ev in loop_svc.run_turn(session, "hello"):
         events.append(ev)
     # 至少要看到 turn/start + assistant/chunk* + turn/end
-    types = [e["event"] for e in events]
+    types = [e.type for e in events]
     assert "turn/start" in types
     assert "turn/end" in types
     # 有内容
-    has_chunk = any(e["event"] == "assistant/chunk" for e in events)
-    has_message = any(e["event"] == "assistant/message" for e in events)
+    has_chunk = any(e.type == "assistant/chunk" for e in events)
+    has_message = any(e.type == "assistant/message" for e in events)
     assert has_chunk or has_message
 
 

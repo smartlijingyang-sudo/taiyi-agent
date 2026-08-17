@@ -7,6 +7,10 @@ dependencies = [
     "taiyi-cordis",
     "taiyi-schemastery",
     "taiyi-cosmokit",
+    "taiyi-loader",
+    "taiyi-group",
+    "taiyi-timer",
+    "taiyi-logger-console",
     "taiyi-core-scope",
     "taiyi-core-sessions",
     "taiyi-core-system-prompt",
@@ -62,6 +66,10 @@ members = [
 taiyi-cordis = { workspace = true }
 taiyi-schemastery = { workspace = true }
 taiyi-cosmokit = { workspace = true }
+taiyi-loader = { workspace = true }
+taiyi-group = { workspace = true }
+taiyi-timer = { workspace = true }
+taiyi-logger-console = { workspace = true }
 taiyi-core-scope = { workspace = true }
 taiyi-core-sessions = { workspace = true }
 taiyi-core-system-prompt = { workspace = true }

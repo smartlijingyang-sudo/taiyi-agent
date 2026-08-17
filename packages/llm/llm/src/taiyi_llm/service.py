@@ -7,7 +7,8 @@ agent loop 真正消费的接口；`complete` 是给脚本 / 简单 case 用的�
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import Any, Protocol, runtime_checkable
 
 from cordis import Context, Service
 
@@ -108,7 +109,10 @@ class LLMService(Service):
 
         self._providers[name] = provider
         self._prefixes.append((prefix, name))
-        if default or self._default_provider is None:
+        # Default is explicit: only `default=True` makes a provider the
+        # fallback for unmatched model names. If no provider is marked
+        # default, `provider_for()` raises on no-match.
+        if default:
             self._default_provider = name
 
     def unregister_provider(self, name: str) -> Any | None:
