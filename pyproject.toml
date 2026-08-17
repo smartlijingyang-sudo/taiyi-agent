@@ -7,6 +7,8 @@ dependencies = [
     "taiyi-cordis",
     "taiyi-core-scope",
     "taiyi-core-session",
+    "taiyi-core-system-prompt",
+    "taiyi-runtime-diagnostics-invariants",
 ]
 
 [build-system]
@@ -28,9 +30,11 @@ taiyi-hmr = { workspace = true }
 taiyi-logger-console = { workspace = true }
 taiyi-core-scope = { workspace = true }
 taiyi-core-session = { workspace = true }
+taiyi-core-system-prompt = { workspace = true }
 taiyi-loader = { workspace = true }
 taiyi-group = { workspace = true }
 taiyi-include = { workspace = true }
+taiyi-runtime-diagnostics-invariants = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
