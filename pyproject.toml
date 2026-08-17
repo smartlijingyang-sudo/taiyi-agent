@@ -3,7 +3,9 @@ name = "taiyi-agent"
 version = "0.1.0"
 description = "Taiyi-Agent — 1:1 Python rebuild of deepseek-harness"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "taiyi-cordis",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -13,6 +15,7 @@ build-backend = "hatchling.build"
 packages = ["src/taiyi_agent"]
 
 [tool.uv.workspace]
-members = []
+members = ["vendor/*"]
 
 [tool.uv.sources]
+taiyi-cordis = { workspace = true }
