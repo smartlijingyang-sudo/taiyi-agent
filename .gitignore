@@ -16,3 +16,5 @@ htmlcov/
 *.log
 node_modules/*.cover
 *.cover
+# pytest-cov coverage data artifacts (parallel mode emits "<file>.py,cover").
+*.py,cover
