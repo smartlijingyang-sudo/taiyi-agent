@@ -14,4 +14,4 @@ htmlcov/
 .env
 .uv-cache/
 *.log
-node_modules/
+node_modules/*.cover
