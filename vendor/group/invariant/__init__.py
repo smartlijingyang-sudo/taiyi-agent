@@ -1,8 +1,9 @@
-"""taiyi-group — 1:1 Python port of @deepseek-ai/cordis-plugin-group.
+"""taiyi-group.invariant — companion subpackage exposing the stable contract.
 
-Public API is re-exported here. The stable contract is defined in
-:mod:`group.invariant`; consumers should depend on that submodule when
-they need a stable API surface.
+This subpackage re-exports the public API contract so cross-package
+importers can depend on a stable surface without coupling to
+implementation layout. Mirrors the upstream TS pattern of a separate
+``invariant/`` barrel directory.
 """
 
 from __future__ import annotations
@@ -24,5 +25,3 @@ __all__ = [
     "carrier_key_of",
     "is_group_carrier",
 ]
-
-__version__ = "0.1.0"

@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "taiyi-cordis",
     "taiyi-core-scope",
+    "taiyi-core-session",
 ]
 
 [build-system]
@@ -26,6 +27,9 @@ taiyi-timer = { workspace = true }
 taiyi-hmr = { workspace = true }
 taiyi-logger-console = { workspace = true }
 taiyi-core-scope = { workspace = true }
+taiyi-core-session = { workspace = true }
+taiyi-loader = { workspace = true }
+taiyi-group = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
