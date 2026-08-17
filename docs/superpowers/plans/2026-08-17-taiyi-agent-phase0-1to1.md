@@ -20,6 +20,8 @@
 **Reference conventions:** `CONVENTIONS.md`
 **上游源码：** `~/deepseek-harness`
 
+> **移植范围硬性约束**：每个 chunk 的实现必须严格 1:1 对应上游对应文件。Plan 列出的 `Files:` 清单是 port scope 的下限——不能因为工作量大就拆掉、合并、跳过 helper / validation / edge case。看到 `assert_*` / `snapshot_*` / `deep_freeze` / `adopt_*` / `freeze_restored_object` 之类的 helper 必须 port 进去，因为它们是上游 append / restore / replay 路径的强制校验，删了就破坏持久化往返。详见 `CONVENTIONS.md` §7.5。
+
 ---
 
 ## Chunk 0: Pre-flight（决策 + 准备）

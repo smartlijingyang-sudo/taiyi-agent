@@ -101,6 +101,21 @@ class Event:
 - 不引第三方依赖除非必要（pydantic / httpx 已 OK）
 - 不为兼容旧行为加 shim（pre-release 阶段，README 已声明）
 
+## 7.5. 移植范围与质量要求（1:1 移植的硬性约定）
+
+**每个 chunk 的实现必须是上游对应的 1:1 port，不允许为了「先跑起来」「缩短工期」「降低复杂度」而跳过 validation/helpers/edge-case。**
+
+- **Plan 列出的每个文件都要 port。** Plan 的 `Files:` 清单是 port scope 的下限——不能因为文件多就拆掉、合并掉、或跳过其中某些。
+- **不要精简上游逻辑。** 看到 `assert_message_event_shape` / `assert_session_event_envelope` / `deep_freeze` / `snapshot_json_value` / `adopt_session_event` 之类的 helper 就 port 进去——它们是上游 append 路径的强制校验，删了就把"构造坏 session 时直接报错"变成"序列化时才静默失败"。
+- **不要省略 edge case。** 上游写的 `boundary 不能落在 open turn 中间`、`seq 必须连续`、`sourceEventSeqs 必须包含每个 shadowed node` 之类的 invariant，是 fork / append / replay 的契约，省了就破坏持久化往返。
+- **TODO 注释禁用于"占位"**。如果某段逻辑暂时用不到，应直接删掉或 `# pragma: no cover`，不能留 `# TODO: implement later` 在 port 文件里假装存在。
+- **Plan 之外的上游文件要 port 吗？** 看 spec §X 表格（如 spec §6 列了 core/session 的 6 个文件）。如果 spec 表格里有，plan 漏了 = plan 漏了，要补；spec 表格没有的，port 也不需要。判断依据是 spec，不是主观"够用就行"。
+
+**违反这条的下游表现**：
+- 100% 测试覆盖仍可能过，但实际跑起来时遇到上游能 catch 的错误这边静默掉
+- fork / replay / restore 这些跨进程场景一上来就 silent divergence
+- "实现完成"看着 OK，但持久化往返不正确（持久化插件读旧 log 时崩或重建错历史）
+
 ## 8. 验证
 
 包完成后跑：
