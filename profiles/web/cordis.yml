@@ -1,4 +1,0 @@
-# taiyi profile root — an empty entry list.
-# The tree is composed as patches: each bundle in package.json's taiyi.profile.bundles,
-# then cordis.patch.yml, then any --patch overlays.
-[]
