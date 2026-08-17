@@ -1,10 +1,11 @@
-"""taiyi-cordis — Python port of @deepseek-ai/cordis plugin framework.
+"""cordis.invariant — companion subpackage exposing the public API contract.
 
-Public API is re-exported here for convenience. The stable contract is
-defined in :mod:`cordis.invariant`; consumers should depend on that submodule
-when they need a stable API surface.
+This subpackage re-exports the public surface of :mod:`cordis` so other
+packages in the taiyi workspace can declare a stable dependency on the
+contract without coupling to the implementation layout.
 
-1:1 alignment with `~/deepseek-harness/vendor/cordis/src/`.
+1:1 with upstream `vendor/cordis/src/invariant/` (which in TS is just a
+re-export barrel; we mirror that pattern as a Python subpackage).
 """
 
 from __future__ import annotations
