@@ -262,6 +262,13 @@ class Fiber:
             except Exception:  # pragma: no cover
                 pass
 
+            # ``self.dispose`` delegates to the parent's effect wrapper
+            # (mirrors upstream ``this.dispose = parent.fiber.effect(...)``).
+            # Calling it triggers the async cleanup chain which sets
+            # ``uid = None``, removes the fiber from ``runtime.fibers``, and
+            # unloads the fiber.
+            self.dispose: Any = self._parent_dispose
+
             # Emit ``internal/plugin`` and trigger initial reload.
             try:
                 self.context_emit_internal_plugin()
@@ -292,6 +299,9 @@ class Fiber:
                 self.uid = 0
                 self.state = FiberState.ACTIVE
                 self.store = {}
+            # Root fibers have nothing to dispose; ``dispose()`` triggers a
+            # restart (matches upstream ``this.dispose = () => this.restart()``).
+            self.dispose: Any = lambda: self.restart()
 
     def context_emit_internal_plugin(self) -> None:
         """Emit ``internal/plugin`` for observability."""

@@ -384,10 +384,15 @@ class TestGetEffects:
     def test_get_effects_returns_empty_when_none(self, make_ctx):
         ctx = make_ctx()
         # Root fiber has internal-listener effects from ``EventsService``.
-        # Filter out framework-installed effects to verify user-installed
-        # effects are empty initially.
+        # Filter out framework-installed effects (ctx.on, ctx.mixin,
+        # ctx.accessor, ctx.provide) to verify user-installed effects
+        # are empty initially.
         all_effects = ctx.fiber.getEffects()
-        user_effects = [e for e in all_effects if not e.label.startswith("ctx.on(")]
+        framework_prefixes = ("ctx.on(", "ctx.mixin(", "ctx.accessor(", "ctx.provide(")
+        user_effects = [
+            e for e in all_effects
+            if not any(e.label.startswith(p) for p in framework_prefixes)
+        ]
         assert user_effects == []
 
     def test_get_effects_records_metadata(self, make_ctx):

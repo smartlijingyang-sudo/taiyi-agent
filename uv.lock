@@ -529,8 +529,14 @@ source = { editable = "vendor/logger-console" }
 
 [[package]]
 name = "taiyi-schemastery"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "vendor/schemastery" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.6" }]
 
 [[package]]
 name = "taiyi-timer"

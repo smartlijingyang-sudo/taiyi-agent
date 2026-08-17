@@ -19,6 +19,11 @@ members = ["vendor/*"]
 
 [tool.uv.sources]
 taiyi-cordis = { workspace = true }
+taiyi-cosmokit = { workspace = true }
+taiyi-schemastery = { workspace = true }
+taiyi-timer = { workspace = true }
+taiyi-hmr = { workspace = true }
+taiyi-logger-console = { workspace = true }
 
 [tool.uv]
 dev-dependencies = [
