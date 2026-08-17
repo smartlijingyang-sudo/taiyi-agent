@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 
 import pytest
 
+from cordis.context import Context
 from cordis.logger import (
     Exporter,
     Logger,
@@ -501,6 +502,114 @@ def _message_stub() -> Message:
     return Message(sn=0, ts=0, name="test", type="info", level=LoggerLevel.INFO, args=[])
 
 
+# ---------------------------------------------------------------------------
+# Coverage: edge branches in json_default, Number, color, format
+# ---------------------------------------------------------------------------
+
+
+class TestJsonDefault:
+    """``_json_default`` returns __dict__ for objects, str otherwise."""
+
+    def test_returns_dict_for_object_with_dict(self):
+        from cordis.logger import _json_default
+
+        class HasDict:
+            def __init__(self):
+                self.x = 1
+
+        obj = HasDict()
+        result = _json_default(obj)
+        assert result == {"x": 1}
+
+    def test_returns_str_for_object_without_dict(self):
+        from cordis.logger import _json_default
+
+        class NoDict:
+            __slots__ = ("x",)
+
+        obj = NoDict()
+        obj.x = 1
+        # __slots__ objects have no __dict__ → falls back to str().
+        result = _json_default(obj)
+        assert isinstance(result, str)
+
+
+class TestNumberCoercion:
+    """``Number`` coerces via str fallback for non-numeric input."""
+
+    def test_coerces_int(self):
+        from cordis.logger import Number
+
+        assert Number(5) == 5.0
+
+    def test_coerces_float(self):
+        from cordis.logger import Number
+
+        assert Number(3.14) == 3.14
+
+    def test_coerces_string_number(self):
+        from cordis.logger import Number
+
+        assert Number("2.5") == 2.5
+
+
+class TestLoggerCodeNegative:
+    """``Logger.code`` handles names whose hash exceeds 32-bit unsigned range."""
+
+    def test_code_with_long_name(self):
+        # Long names overflow the int32 hash → triggers negative branch.
+        code = Logger.code("a" * 100, 1)
+        assert isinstance(code, int)
+        assert 0 <= code < 256
+
+
+class TestExportersPop:
+    """``LoggerService.exporters.pop`` returns True when key exists."""
+
+    async def test_exporters_pop_returns_true(self):
+        ctx = Context()
+        ls = LoggerService(ctx)
+        # Install a fake exporter and remove it.
+        ls.exporters["fake"] = lambda m: None
+        result = ls.exporters.pop("fake")
+        assert result is not None
+
+
+class TestFormatEdgeCases:
+    """``Logger.format`` edge cases for non-str fmt / o formatter errors."""
+
+    def test_format_returns_empty_when_no_args(self):
+        msg = Message(sn=0, ts=0, name="x", type="info", level=1, args=[])
+        result = Logger.format(_exporter_stub(), msg)
+        assert result == ""
+
+    def test_format_converts_non_string_fmt(self):
+        # First arg is non-string (e.g. an int) — should be coerced to "%o".
+        msg = Message(
+            sn=0,
+            ts=0,
+            name="x",
+            type="info",
+            level=1,
+            args=[42],
+        )
+        result = Logger.format(_exporter_stub(), msg)
+        assert "42" in result
+
+    def test_format_handles_dict_arg(self):
+        msg = Message(
+            sn=0,
+            ts=0,
+            name="x",
+            type="info",
+            level=1,
+            args=["hello %s", {"k": "v"}],
+        )
+        result = Logger.format(_exporter_stub(), msg)
+        assert "hello" in result
+        assert "k" in result or "v" in result
+
+
 __all__ = [
     "TestLoggerLevel",
     "TestHyphenate",
@@ -511,4 +620,9 @@ __all__ = [
     "TestLoggerFormat",
     "TestLoggerFacade",
     "TestLoggerService",
+    "TestJsonDefault",
+    "TestNumberCoercion",
+    "TestLoggerCodeNegative",
+    "TestExportersPop",
+    "TestFormatEdgeCases",
 ]

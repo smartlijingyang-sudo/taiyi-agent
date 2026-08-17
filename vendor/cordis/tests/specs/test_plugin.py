@@ -163,10 +163,75 @@ class TestPluginProtocol:
         assert is_plugin(registry["first"]) is True
 
 
+class TestPluginDuckTypedFallback:
+    """Duck-typed detection fallbacks when attribute access raises."""
+
+    def test_is_plugin_with_raising_attr(self):
+        # Object whose __getattr__ raises on attribute lookup (no flag attr).
+        class FlagRaise:
+            def __getattr__(self, _name: str):
+                raise OSError("no flag")
+
+        assert is_plugin(FlagRaise()) is False
+
+    def test_get_plugin_meta_with_raising_attr(self):
+        # Non-Plugin object whose meta-attr access raises -> returns {}.
+        class MetaRaise:
+            def __getattr__(self, _name: str):
+                raise OSError("no meta")
+
+        assert get_plugin_meta(MetaRaise()) == {}
+
+    def test_get_plugin_meta_with_falsy_meta(self):
+        # Non-Plugin object whose __cordis_plugin_meta__ attr is None/0 -> {}.
+        class MetaNone:
+            __cordis_plugin_meta__ = None
+
+        assert get_plugin_meta(MetaNone()) == {}
+
+    def test_get_plugin_meta_returns_copy_of_meta(self):
+        # Non-Plugin object with a real meta dict -> returns a copy.
+        class MetaHolder:
+            __cordis_plugin_meta__ = {"x": 1}
+
+        meta = get_plugin_meta(MetaHolder())
+        meta["y"] = 2
+        assert MetaHolder.__cordis_plugin_meta__ == {"x": 1}
+
+    def test_get_plugin_name_with_raising_attr(self):
+        class Raise:
+            def __getattr__(self, _name: str):
+                raise OSError("no name")
+
+        assert get_plugin_name(Raise()) is None
+
+    def test_get_plugin_inject_with_raising_attr(self):
+        class Raise:
+            def __getattr__(self, _name: str):
+                raise OSError("no inject")
+
+        assert get_plugin_inject(Raise()) is None
+
+    def test_get_plugin_inject_returns_copy(self):
+        class InjectHolder:
+            inject = ["a", "b"]
+
+        inj = get_plugin_inject(InjectHolder())
+        inj.append("c")
+        assert InjectHolder.inject == ["a", "b"]
+
+    def test_get_plugin_inject_none_inject(self):
+        class InjectNone:
+            inject = None
+
+        assert get_plugin_inject(InjectNone()) is None
+
+
 __all__ = [
     "TestPluginBare",
     "TestPluginWithArgs",
     "TestPluginMetadata",
     "TestPluginCallable",
     "TestPluginProtocol",
+    "TestPluginDuckTypedFallback",
 ]

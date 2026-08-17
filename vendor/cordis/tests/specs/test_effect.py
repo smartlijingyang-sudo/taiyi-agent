@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
-from cordis.disposer import Effect
+from cordis.disposer import Disposer, Effect, _as_func, dispose_all, run_disposer
 
 
 class TestEffect:
@@ -118,6 +120,141 @@ class TestEffect:
         assert len(effect.dispose_fns) == 0
 
         await effect.__disposer__()
+
+
+class TestRunDisposer:
+    """``run_disposer`` supports sync / async / iterable results."""
+
+    async def test_run_sync_callable(self):
+        """Sync callable runs without await."""
+
+        def cleanup():
+            cleanup.called = True
+
+        await run_disposer(Disposer(func=cleanup))
+        assert cleanup.called is True
+
+    async def test_run_async_callable(self):
+        """Async callable is awaited."""
+
+        async def cleanup():
+            cleanup.called = True
+
+        await run_disposer(Disposer(func=cleanup))
+        assert cleanup.called is True
+
+    async def test_run_async_iterable(self):
+        """Async iterable of disposers is drained."""
+        calls = []
+
+        async def agen():
+            yield lambda: calls.append("1")
+            yield lambda: calls.append("2")
+
+        # The disposer function returns an async generator.
+        def disposer_fn():
+            return agen()
+
+        await run_disposer(Disposer(func=disposer_fn))
+
+    async def test_run_sync_iterable_of_disposers(self):
+        """Sync iterable is drained (the values are not invoked as disposers)."""
+        # The implementation drains the iterable but doesn't call each value
+        # (mirrors upstream ``runDisposer`` behavior).
+        # We just verify that iteration completes without error.
+
+        def disposer_fn():
+            return iter([1, 2, 3])
+
+        # No assertion needed beyond completion.
+        await run_disposer(Disposer(func=disposer_fn))
+
+    async def test_run_string_passes_through(self):
+        """String result is iterable but treated as a passthrough (no iteration)."""
+
+        def disposer_fn():
+            return "not-iterated"
+
+        # run_disposer should NOT iterate the string.
+        await run_disposer(Disposer(func=disposer_fn))
+
+
+class TestDisposeAll:
+    """``dispose_all`` runs each caller's disposer."""
+
+    async def test_dispose_all_sync_list(self):
+        calls = []
+
+        def make(value):
+            def fn():
+                calls.append(value)
+            return fn
+
+        await dispose_all([make(1), make(2), make(3)])
+        assert calls == [1, 2, 3]
+
+    async def test_dispose_all_with_async(self):
+        """Async callables in the iter are awaited."""
+        calls = []
+
+        def sync():
+            calls.append("sync")
+
+        async def async_fn():
+            calls.append("async")
+
+        await dispose_all([sync, async_fn])
+        assert calls == ["sync", "async"]
+
+
+class TestAsFunc:
+    """``_as_func`` adapts a raw value to a disposer."""
+
+    def test_as_func_with_callable(self):
+        """Callable value is returned as-is."""
+
+        def my_fn():
+            return "result"
+
+        assert _as_func(my_fn) is my_fn
+
+    def test_as_func_with_non_callable(self):
+        """Non-callable value is wrapped in a no-op lambda."""
+        sentinel = object()
+        fn = _as_func(sentinel)
+        # Calling the wrapped fn should not raise; returns the original value.
+        result = fn()
+        assert result is sentinel
+
+
+class TestEffectOfPassthrough:
+    """``Effect.of`` returns the value as-is when it's already an Effect."""
+
+    def test_effect_of_returns_same_effect(self):
+        """Effect.of(effect) returns the same effect (identity)."""
+        original = Effect.of(lambda: None)
+        result = Effect.of(original)
+        assert result is original
+
+
+class TestDisposeAllAsyncIter:
+    """``dispose_all`` supports async iterable."""
+
+    async def test_dispose_all_async_iterable(self):
+        """Async iterable of disposers is awaited."""
+        calls = []
+
+        def make(value):
+            def fn():
+                calls.append(value)
+            return fn
+
+        async def agen():
+            yield make(1)
+            yield make(2)
+
+        await dispose_all(agen())
+        assert calls == [1, 2]
 
 
 __all__ = ["TestEffect"]

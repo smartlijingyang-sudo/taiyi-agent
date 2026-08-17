@@ -190,6 +190,24 @@ class TestReflectHandlerGet:
         result = ctx.reflect.handler.get(ctx, "my_service")
         assert result == 42
 
+    def test_get_via_plugin_fiber_returns_value(self, make_ctx):
+        """Plugin fiber (with runtime) takes the _get_impl → get_traceable path."""
+        async def _go() -> None:
+            ctx = make_ctx()
+
+            def plugin(this: Context, cfg: Any) -> None:
+                # Provide inside the plugin → fiber.ctx has the impl.
+                this.reflect.provide("foo", 99)
+
+            fiber = ctx.registry.plugin(plugin, {})
+            await fiber.await_()
+            # The plugin fiber's ctx has fiber.runtime not None AND
+            # _get_impl("foo") returns non-None → exercises line 231.
+            result = fiber.ctx.reflect.handler.get(fiber.ctx, "foo")
+            assert result == 99
+
+        asyncio.run(_go())
+
     def test_get_returns_none_for_missing_service(self, make_ctx):
         ctx = make_ctx()
         result = ctx.reflect.handler.get(ctx, "missing_service")
@@ -891,3 +909,289 @@ def test_reflect_module_imports():
     assert hasattr(r, "ReflectHandler")
     assert hasattr(r, "Property")
     assert hasattr(r, "Impl")
+
+
+# ---------------------------------------------------------------------------
+# Coverage: edge branches / fallback paths not hit by happy-path tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsSpecialPropertyEdgeCases:
+    """``_is_special_property`` branches not covered by main suite."""
+
+    def test_non_string_returns_false(self):
+        from cordis.reflect import _is_special_property
+
+        assert _is_special_property(None) is False
+        assert _is_special_property(42) is False
+
+
+class TestMixinAccessorBranches:
+    """``_MixinAccessor.get`` covers missing-attr / free-function partial branches."""
+
+    def test_accessor_get_returns_none_for_missing_target(self, make_ctx):
+        """Accessor whose get callback returns None → propagates None."""
+        ctx = make_ctx()
+        ctx.reflect.accessor("null_value", {"get": lambda *a: None})
+        result = ctx.reflect.handler.get(ctx, "null_value")
+        assert result is None
+
+    def test_accessor_get_returns_non_callable_value_directly(self, make_ctx):
+        """Accessor returns a non-callable value (no partial binding)."""
+        ctx = make_ctx()
+        ctx.reflect.accessor("plain_value", {"get": lambda *a: 42})
+        result = ctx.reflect.handler.get(ctx, "plain_value")
+        assert result == 42
+
+    def test_accessor_get_via_callable_returns_value(self, make_ctx):
+        """Accessor returns a callable → returned directly (no partial)."""
+        ctx = make_ctx()
+        sentinel = lambda: "hi"
+        ctx.reflect.accessor("callable_value", {"get": lambda *a: sentinel})
+        result = ctx.reflect.handler.get(ctx, "callable_value")
+        assert result is sentinel
+
+    def test_mixin_returns_none_for_missing_attribute(self, make_ctx):
+        """Mixin accessor returns None when source object lacks the attribute."""
+        ctx = make_ctx()
+
+        class Service:
+            pass
+
+        ctx.reflect.provide("svc", Service())
+        # Mixin "no_such_attr" — Service doesn't have this.
+        ctx.reflect.mixin("svc", ["no_such_attr"])
+        result = ctx.reflect.handler.get(ctx, "no_such_attr")
+        assert result is None
+
+    def test_mixin_returns_none_when_string_source_missing(self, make_ctx):
+        """Mixin with string source that doesn't resolve to a service → None."""
+        ctx = make_ctx()
+        # String source, but no service registered for it.
+        ctx.reflect.mixin("nonexistent_service", ["some_attr"])
+        result = ctx.reflect.handler.get(ctx, "some_attr")
+        assert result is None
+
+    def test_mixin_returns_non_callable_directly(self, make_ctx):
+        """Mixin exposes non-callable attribute directly (no partial)."""
+        ctx = make_ctx()
+
+        class Service:
+            value = 42
+
+        ctx.reflect.provide("svc", Service())
+        ctx.reflect.mixin("svc", ["value"])
+        result = ctx.reflect.handler.get(ctx, "value")
+        assert result == 42
+
+    def test_mixin_partial_binds_free_function(self, make_ctx):
+        """Mixin exposes free function (no __self__) → bound via partial."""
+        from functools import partial
+
+        def free(receiver: Any) -> str:
+            return f"called with {receiver}"
+
+        class Service:
+            method = staticmethod(free)  # type: ignore[assignment]
+
+        ctx = make_ctx()
+        ctx.reflect.provide("svc", Service())
+        ctx.reflect.mixin("svc", ["method"])
+        result = ctx.reflect.handler.get(ctx, "method")
+        # Result should be a partial that wraps the free function.
+        assert result is not None
+        assert not hasattr(result, "__self__")
+        assert isinstance(result, partial)
+        # Calling the partial without args invokes the bound function with receiver=None.
+        assert result() == "called with None"
+
+
+class TestEnhanceErrorWithTraceback:
+    """``_enhance_error`` populates ``cordis_stack`` from a real traceback."""
+
+    def test_enhance_error_with_real_traceback(self):
+        from cordis.reflect import _enhance_error
+
+        try:
+            raise ValueError("boom")
+        except ValueError as e:
+            enhanced = _enhance_error(e)
+        # The enhanced error has the splice applied.
+        assert hasattr(enhanced, "cordis_stack")
+        # Stack should mention the original error.
+        assert "boom" in enhanced.cordis_stack
+
+
+class TestReflectHandlerFiberRuntimeNone:
+    """ReflectHandler.get covers the fiber-runtime-is-None path."""
+
+    async def test_get_returns_value_when_fiber_runtime_none(self):
+        """No active plugin fiber → fall back to ``ctx.reflect.get`` directly."""
+        ctx = Context()
+        ctx.reflect.provide("foo", 42)
+
+        # Reach the fallback path by simulating a fiber without runtime.
+        # We do this by clearing the fiber.runtime attribute temporarily.
+        original = ctx.fiber.runtime
+        ctx.fiber.runtime = None
+        try:
+            result = ctx.reflect.handler.get(ctx, "foo")
+        finally:
+            ctx.fiber.runtime = original
+
+        assert result == 42
+        await ctx.dispose()
+
+    async def test_get_falls_back_to_reflect_get_when_no_fiber(self):
+        """ReflectHandler.get handles ctx without fiber gracefully."""
+        ctx = Context()
+        ctx.reflect.provide("foo", 1)
+        # Wipe the fiber attribute so getattr returns None.
+        original = getattr(ctx, "fiber", None)
+        try:
+            object.__setattr__(ctx, "fiber", None)
+            result = ctx.reflect.handler.get(ctx, "foo")
+            assert result == 1
+        finally:
+            if original is not None:
+                object.__setattr__(ctx, "fiber", original)
+        await ctx.dispose()
+
+
+class TestGetImplWhenIsolateMissing:
+    """``ReflectService._get_impl`` returns None when isolate_map lacks key."""
+
+    def test_get_impl_returns_none_when_key_not_in_isolate(self, make_ctx):
+        ctx = make_ctx()
+        ctx.reflect.provide("foo", 1)
+        # Tamper: remove the entry from isolate map (simulating stale state).
+        iso = ctx["cordis.isolate"]
+        original_keys = dict(iso)
+        iso.clear()
+        try:
+            assert ctx.reflect._get_impl("foo") is None
+        finally:
+            iso.update(original_keys)
+
+
+class TestNotifyWithoutRegistry:
+    """``ReflectService.notify`` returns empty fibers when registry is absent."""
+
+    def test_notify_returns_empty_when_no_registry(self, make_ctx):
+        ctx = make_ctx()
+        # Force registry to be None to exercise the early-return branch.
+        # ``ctx.registry`` is a member_descriptor — must use object.__setattr__
+        # to override the instance attribute.
+        original_registry = ctx.registry
+        object.__setattr__(ctx, "registry", None)
+        try:
+            fibers = ctx.reflect.notify(["foo"])
+            assert fibers == []
+        finally:
+            object.__setattr__(ctx, "registry", original_registry)
+
+    def test_notify_skips_fiber_when_name_not_in_inject(self, make_ctx):
+        """A fiber whose inject is None is skipped (continue branch)."""
+        async def _go() -> None:
+            ctx = make_ctx()
+            ctx.reflect.provide("foo", 1)
+
+            def plugin(this: Context, cfg: Any) -> None:
+                pass
+
+            # Plugin with no inject at all → fiber.inject == {} initially.
+            fiber = ctx.registry.plugin(plugin, {})
+            await fiber.await_()
+            # Patch inject to None to trigger the ``fiber.inject is None`` branch.
+            fiber.inject = None
+            # Now notify "foo" — the inner loop continues past the fiber.
+            fibers = ctx.reflect.notify(["foo"])
+            assert isinstance(fibers, list)
+
+        asyncio.run(_go())
+
+
+class TestDefaultNotifyFilterIsolateNotDict:
+    """``_default_notify_filter`` returns True when isolate maps aren't dicts."""
+
+    def test_filter_returns_true_when_isolate_not_dict(self, make_ctx):
+        ctx = make_ctx()
+        # Directly replace the internal isolate map (bypass Context.__setattr__).
+        ctx.__dict__["_isolate_map"] = "not-a-dict"
+        # Default filter should bail out with True.
+        assert ctx.reflect._default_notify_filter(ctx, "foo") is True
+
+
+class TestReflectHandlerErrorPaths:
+    """Handler.get covers the fiber-chain error paths (inactive inject etc)."""
+
+    def test_get_raises_enhanced_error_for_unresolved_inject(self, make_ctx):
+        """Plugin fiber declares inject but never provides → enhanced error."""
+        async def _go() -> None:
+            ctx = make_ctx()
+
+            def plugin(this: Context, cfg: Any) -> None:
+                # Plugin that requires inject "foo" but never provides it.
+                pass
+
+            fiber = ctx.registry.plugin(
+                {"apply": plugin, "inject": ["foo"]}, {}
+            )
+            await fiber.await_()
+            # Now query "foo" via fiber.ctx — should raise enhanced error.
+            with pytest.raises(Exception) as excinfo:
+                fiber.ctx.reflect.handler.get(fiber.ctx, "foo")
+            # The error has been enhanced (cordis_stack attribute set).
+            assert hasattr(excinfo.value, "cordis_stack")
+
+        asyncio.run(_go())
+
+
+class TestGetImplEdgeCases:
+    """``_get_impl`` returns None for non-dict isolate map."""
+
+    def test_get_impl_returns_none_when_isolate_not_dict(self, make_ctx):
+        ctx = make_ctx()
+        ctx.reflect.provide("foo", 1)
+        # Directly replace the internal isolate map (bypass Context.__setattr__).
+        ctx.__dict__["_isolate_map"] = "string-not-dict"
+        assert ctx.reflect._get_impl("foo") is None
+
+
+class TestReflectSetNonDictIsolate:
+    """``Reflect.set`` raises when isolate_map is not a dict."""
+
+    def test_set_raises_when_isolate_not_dict(self, make_ctx):
+        ctx = make_ctx()
+        ctx.reflect.provide("foo", 1)
+        # Replace the internal isolate map with a non-dict value.
+        ctx.__dict__["_isolate_map"] = 42
+        with pytest.raises(RuntimeError, match="cannot set property"):
+            ctx.reflect.set("foo", 99)
+
+
+class TestNotifyEdgeCases:
+    """``ReflectService.notify`` edge cases."""
+
+    def test_notify_skips_fiber_without_inject_match(self, make_ctx):
+        """A fiber whose inject doesn't include any of the notified names is skipped."""
+        ctx = make_ctx()
+        # Provide some service to trigger notify walk.
+        ctx.reflect.provide("foo", 1)
+
+        async def _go() -> None:
+            def plugin(this: Context, cfg: Any) -> None:
+                pass
+
+            # Plugin with inject list that doesn't include "foo".
+            fiber = ctx.registry.plugin(
+                {"apply": plugin, "inject": ["other_service"]}, {}
+            )
+            await fiber.await_()
+
+            # Now notify "foo" — the plugin fiber's inject doesn't include it,
+            # so it should be skipped (continue branch).
+            fibers = ctx.reflect.notify(["foo"])
+            assert isinstance(fibers, list)
+
+        asyncio.run(_go())

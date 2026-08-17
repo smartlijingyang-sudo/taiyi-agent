@@ -1045,3 +1045,37 @@ class TestClassPlugin:
         fiber = ctx.registry.plugin(Demo2, {})
         await fiber.await_()
         assert isinstance(fiber, Fiber)
+
+    async def test_class_plugin_with_init_hooks_list(self, make_ctx):
+        """Class plugin with ``cordis.init_hooks`` (list) runs each hook."""
+        ctx = make_ctx()
+        log: list[str] = []
+
+        class Demo:
+            def __init__(self, this: Context, config: Any) -> None:
+                self.this = this
+                self.config = config
+                self.__dict__["cordis.init_hooks"] = [
+                    lambda: log.append("hook1"),
+                    lambda: log.append("hook2"),
+                ]
+
+        fiber = ctx.registry.plugin(Demo, {})
+        await fiber.await_()
+        # Both hooks should have been invoked.
+        assert log == ["hook1", "hook2"]
+
+    async def test_class_plugin_with_cordis_init_method(self, make_ctx):
+        """Class plugin with ``cordis.init`` method runs it."""
+        ctx = make_ctx()
+        log: list[str] = []
+
+        class DemoInit:
+            def __init__(self, this: Context, config: Any) -> None:
+                self.this = this
+                # Set cordis.init on the instance so getattr finds it.
+                self.__dict__["cordis.init"] = lambda: log.append("init")
+
+        fiber = ctx.registry.plugin(DemoInit, {})
+        await fiber.await_()
+        assert log == ["init"]

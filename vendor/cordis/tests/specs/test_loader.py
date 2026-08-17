@@ -57,6 +57,17 @@ class TestEntry:
         assert entry["id"] == "x"
         assert entry["name"] == "X"
 
+    def test_getitem_config_disabled_inject(self):
+        entry = Entry(id="x", config={"k": 1}, disabled=True, inject=["y"])
+        assert entry["config"] == {"k": 1}
+        assert entry["disabled"] is True
+        assert entry["inject"] == ["y"]
+
+    def test_getitem_extra(self):
+        entry = Entry(id="x")
+        entry["custom"] = "value"
+        assert entry["custom"] == "value"
+
     def test_setitem_arbitrary(self):
         entry = Entry(id="x")
         entry["custom"] = "value"
@@ -335,6 +346,102 @@ class TestLoader:
         assert loader is not None
 
 
+# ---------------------------------------------------------------------------
+# Coverage: edge branches / fallback paths not hit by happy-path tests
+# ---------------------------------------------------------------------------
+
+
+class TestEntrySetitemBranches:
+    """Entry.__setitem__ branches for known fields."""
+
+    def test_setitem_id(self):
+        e = Entry(id="old")
+        e["id"] = "new"
+        assert e.id == "new"
+
+    def test_setitem_name(self):
+        e = Entry(id="x")
+        e["name"] = "X"
+        assert e.name == "X"
+
+    def test_setitem_config(self):
+        e = Entry(id="x")
+        e["config"] = {"k": 1}
+        assert e.config == {"k": 1}
+
+    def test_setitem_disabled(self):
+        e = Entry(id="x")
+        e["disabled"] = True
+        assert e.disabled is True
+
+    def test_setitem_inject(self):
+        e = Entry(id="x")
+        e["inject"] = ["a"]
+        assert e.inject == ["a"]
+
+
+class TestEntryGroupGetitem:
+    """EntryGroup.__getitem__ returns key/entries or None for unknown."""
+
+    def test_getitem_key(self):
+        g = EntryGroup(key="k", entries=[])
+        assert g["key"] == "k"
+
+    def test_getitem_entries(self):
+        e = Entry(id="a")
+        g = EntryGroup(key="k", entries=[e])
+        assert g["entries"] == [e]
+
+    def test_getitem_unknown_returns_none(self):
+        g = EntryGroup(key="k", entries=[])
+        assert g["unknown"] is None
+
+
+class TestInterpolateNoneScope:
+    """interpolate() defaults scope to empty dict when None is passed."""
+
+    def test_none_scope_string_passes_through(self):
+        # String with no tokens: same as before, but exercises scope=None branch.
+        assert interpolate("plain text", None) == "plain text"
+
+    def test_none_scope_keeps_unknown_tokens(self):
+        # ${x} is unknown, no scope supplied → left as-is.
+        assert interpolate("${x}", None) == "${x}"
+
+
+class TestParseEntryExtraFields:
+    """_parse_entry captures fields outside the known schema into ``extra``."""
+
+    def test_extra_fields_captured(self):
+        tree = load_config([{"id": "x", "weird_field": "hello", "n": 42}])
+        entry = tree.find("x")
+        assert entry is not None
+        assert entry.extra == {"weird_field": "hello", "n": 42}
+
+
+class TestLoadConfigInvalidEntry:
+    """load_config raises ValueError for non-Mapping entries inside a list."""
+
+    def test_non_dict_in_list_raises(self):
+        with pytest.raises(ValueError, match="entry must be a dict"):
+            load_config([{"id": "x"}, "not-a-dict"])  # type: ignore[list-item]
+
+
+class TestBundleToDict:
+    """Bundle.to_dict serializes name + entries."""
+
+    def test_to_dict_round_trip(self):
+        b = Bundle(name="b1", entries=[Entry(id="a", name="A")])
+        assert b.to_dict() == {
+            "name": "b1",
+            "entries": [{"id": "a", "name": "A"}],
+        }
+
+    def test_to_dict_empty(self):
+        b = Bundle(name="empty")
+        assert b.to_dict() == {"name": "empty", "entries": []}
+
+
 __all__ = [
     "TestEntry",
     "TestEntryGroup",
@@ -346,4 +453,10 @@ __all__ = [
     "TestDumpConfig",
     "TestBundle",
     "TestLoader",
+    "TestEntrySetitemBranches",
+    "TestEntryGroupGetitem",
+    "TestInterpolateNoneScope",
+    "TestParseEntryExtraFields",
+    "TestLoadConfigInvalidEntry",
+    "TestBundleToDict",
 ]
