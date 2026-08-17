@@ -122,6 +122,25 @@ class Context:
         if dispose is not None:
             self.disposers.append(Disposer(dispose, label=f"provide:{key}"))
 
+    def effect(
+        self,
+        dispose: Callable[[], Any],
+        *,
+        label: str = "effect",
+    ) -> None:
+        """Register a disposer without creating a binding.
+
+        Use this for services or other objects that need cleanup but aren't
+        injected by key. Errors in the disposer are swallowed (logged).
+
+        Args:
+            dispose: Cleanup callable (sync or async).
+            label: Diagnostic label for the disposer.
+        """
+        if self.state_disposed:
+            raise RuntimeError("cannot add effect on a disposed context")
+        self.disposers.append(Disposer(dispose, label=label))
+
     def inject(self, key: str, *, default: Any = _MISSING) -> Any:
         """Resolve `key`; walk the parent chain; raise `KeyError` if missing.
 
@@ -243,7 +262,11 @@ class Context:
     # -- lifecycle ----------------------------------------------------------
 
     async def dispose(self) -> None:
-        """Run all registered disposers in reverse-registration order; idempotent."""
+        """Run all registered disposers in reverse-registration order; idempotent.
+
+        Errors in individual disposers are logged but swallowed to allow
+        all disposers to run.
+        """
         if self.state_disposed:
             return
         self.state_disposed = True
@@ -251,7 +274,14 @@ class Context:
         disposers = self.disposers
         self.disposers = []
         for disp in reversed(disposers):
-            await run_disposer(disp)
+            try:
+                await run_disposer(disp)
+            except Exception as e:
+                # Log but don't propagate — other disposers must still run.
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"disposer {disp.label!r} raised {type(e).__name__}: {e}"
+                )
 
 
 class _ScopeCM:
