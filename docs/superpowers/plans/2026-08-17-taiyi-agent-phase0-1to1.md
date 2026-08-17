@@ -359,9 +359,9 @@
 - Create: `vendor/cosmokit/invariant/__init__.py`
 - Create: `vendor/cosmokit/tests/specs/test_*.py`（每个模块一个测试文件）
 
-- [ ] **Step 1: TDD 每个函数 + 100% 覆盖**
-- [ ] **Step 2: 注册到 workspace + `uv sync`**
-- [ ] **Step 3: Commit**
+- [x] **Step 1: TDD 每个函数 + 100% 覆盖**
+- [x] **Step 2: 注册到 workspace + `uv sync`**
+- [x] **Step 3: Commit** (`c68a06a`)
 
 ### Task 2.2: vendor/schemastery（1 文件 / 902 LOC）
 
@@ -377,7 +377,7 @@
 - Create: `vendor/schemastery/invariant/__init__.py`
 - Create: `vendor/schemastery/tests/specs/test_schema.py`
 
-- [ ] **Step 1: TDD Schema DSL**
+- [x] **Step 1: TDD Schema DSL**
   - `z.object({a: z.string()})` 构造 + 校验 dict
   - `z.union([z.string(), z.number()])`
   - `z.array(z.number())`
@@ -386,8 +386,8 @@
   - `ValidationError` 类型 + message 格式
   - 100% 覆盖
 
-- [ ] **Step 2: 注册 + 验证**
-- [ ] **Step 3: Commit**
+- [x] **Step 2: 注册 + 验证**
+- [x] **Step 3: Commit** (`ae54fb1` 初始 + `11df23a` 集成 cosmokit)
 
 ---
 
