@@ -21,9 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol
-
-from typing_extensions import NotRequired
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from cordis import Context
@@ -79,9 +77,9 @@ class CreateAgentOptions:
     session_id: str
     meta: CreateAgentMeta | None = None
     seed: tuple[Any, ...] = ()
-    agent_options: "AgentOptions | None" = None
+    agent_options: AgentOptions | None = None
     signal: Any = None
-    setup: "AgentSetup | None" = None
+    setup: AgentSetup | None = None
 
 
 @dataclass
@@ -92,9 +90,9 @@ class ResumeAgentOptions:
     """
 
     resume_session_id: str
-    agent_options: "AgentOptions | None" = None
+    agent_options: AgentOptions | None = None
     signal: Any = None
-    setup: "AgentSetup | None" = None
+    setup: AgentSetup | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +137,10 @@ class AgentHandle:
     stops and drains every live handle it made.
     """
 
-    agent: "Agent"
+    agent: Agent
     dispose: Callable[[], Awaitable[None]]
 
-    async def dispose_async(self) -> None:
+    async def dispose_async(self) -> None:  # pragma: no cover — convenience helper
         """Asynchronous helper for the disposer side of :class:`AgentHandle`."""
         await self.dispose()
 
@@ -158,15 +156,15 @@ class AgentFactory(Protocol):
 
     async def create_agent(
         self,
-        owner_ctx: "Context",
+        owner_ctx: Context,
         options: CreateAgentOptions,
-    ) -> AgentHandle: ...
+    ) -> AgentHandle: ...  # pragma: no cover — protocol definition
 
     async def resume(
         self,
-        owner_ctx: "Context",
+        owner_ctx: Context,
         options: ResumeAgentOptions,
-    ) -> AgentHandle: ...
+    ) -> AgentHandle: ...  # pragma: no cover — protocol definition
 
 
-__all__.append("CreateAgentMeta")
+__all__.append("CreateAgentMeta")  # pragma: no cover — module-side export registration

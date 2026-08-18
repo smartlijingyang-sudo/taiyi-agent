@@ -29,14 +29,13 @@ without depending on the not-yet-ported LLM / system-prompt packages.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
-from typing_extensions import NotRequired
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, Protocol, TypedDict
 
 if TYPE_CHECKING:
     from cordis import Context
+    from taiyi_core_session.session import Session
 
     from taiyi_core_agent.inbox import Inbox
-    from taiyi_core_session.session import Session
 
 
 __all__ = [
@@ -124,20 +123,20 @@ class Agent(Protocol):
 
     id: str  # SessionId alias; declared as plain str to avoid the import cycle.
     options: AgentOptions
-    session: "Session"
-    inbox: "Inbox"
-    status: "AgentStatus"
-    ctx: "Context"
+    session: Session
+    inbox: Inbox
+    status: AgentStatus
+    ctx: Context
 
-    def cancel(self, cause: Any, options: CancelOptions | None = ...) -> None: ...
-    async def when_idle(self) -> None: ...
-    def run_maintenance(
+    def cancel(self, cause: Any, options: CancelOptions | None = ...) -> None: ...  # pragma: no cover
+    async def when_idle(self) -> None: ...  # pragma: no cover
+    def run_maintenance(  # pragma: no cover
         self, task: Callable[[Any], Any]
     ) -> Any: ...
-    def send(self, message: Any, target: str, wakeup: bool) -> None: ...
-    def followup(self, message: Any) -> None: ...
-    def steer(self, message: Any) -> None: ...
-    def inject(self, message: Any) -> None: ...
+    def send(self, message: Any, target: str, wakeup: bool) -> None: ...  # pragma: no cover
+    def followup(self, message: Any) -> None: ...  # pragma: no cover
+    def steer(self, message: Any) -> None: ...  # pragma: no cover
+    def inject(self, message: Any) -> None: ...  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------

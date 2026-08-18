@@ -24,7 +24,7 @@ __all__ = ["emit_agent_event"]
 
 
 def emit_agent_event(
-    ctx: "Context",
+    ctx: Context,
     agent: Any,
     name: str,
     payload: Any,

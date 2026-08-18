@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 from collections.abc import Callable
 from typing import Any
@@ -12,16 +11,14 @@ import pytest
 from cordis import Context
 
 from taiyi_core_agent.factory import (
-    AgentFactory,
-    AgentHandle,
-    CreateAgentOptions,
     DISPOSED_INITIATOR_MESSAGE,
     NO_FACTORY_MESSAGE,
     NO_INITIATOR_MESSAGE,
+    AgentHandle,
+    CreateAgentOptions,
     ResumeAgentOptions,
 )
 from taiyi_core_agent.registry import AgentEntry, AgentRegistry, InitiatorRun
-
 
 # ---------------------------------------------------------------------------
 # Service registration surface
@@ -45,6 +42,19 @@ def test_require_initiator_raises_outside_boundary(make_ctx) -> None:
     registry = AgentRegistry(make_ctx)
     with pytest.raises(RuntimeError, match=re.escape(NO_INITIATOR_MESSAGE)):
         registry.require_initiator()
+
+
+def test_require_initiator_returns_agent(make_ctx) -> None:
+    """`require_initiator` returns the active initiator when present."""
+    registry = AgentRegistry(make_ctx)
+    sentinel = _make_agent("sentinel")
+    seen: list[Any] = []
+
+    def _op() -> None:
+        seen.append(registry.require_initiator())
+
+    registry.with_initiator(sentinel, _op)
+    assert seen and seen[0] is sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +478,7 @@ class _AgentStub:
     """Minimal Agent stand-in exposing the surface the registry reads."""
 
     id: str
-    session: "_SessionStub"
+    session: _SessionStub
     options: dict
     inbox: Any
     status: Any

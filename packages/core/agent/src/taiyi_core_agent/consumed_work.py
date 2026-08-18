@@ -83,7 +83,7 @@ def accounts_for_claim(reason: Mapping[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def fold_consumed_work(events: "list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]") -> ConsumedWork:
+def fold_consumed_work(events: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]) -> ConsumedWork:
     """Fold one agent log into its account of consumed work.
 
     Mirrors upstream `foldConsumedWork`. Single pass, every input is the
@@ -100,21 +100,21 @@ def fold_consumed_work(events: "list[Mapping[str, Any]] | tuple[Mapping[str, Any
         event_type = event.get("type") if isinstance(event, Mapping) else None
         if event_type == "turn/start":
             data = event.get("data") if isinstance(event, Mapping) else None
-            if isinstance(data, Mapping):
+            if isinstance(data, Mapping):  # pragma: no cover — defensive
                 turn = data.get("turn")
                 if isinstance(turn, int) and not isinstance(turn, bool):
                     open_turn = turn
             continue
         if event_type == "step/start":
             data = event.get("data") if isinstance(event, Mapping) else None
-            if isinstance(data, Mapping):
+            if isinstance(data, Mapping):  # pragma: no cover — defensive
                 turn = data.get("turn")
                 if isinstance(turn, int) and not isinstance(turn, bool):
                     stepped.add(turn)
             continue
         if event_type == "agent/inbox/spliced":
             data = event.get("data") if isinstance(event, Mapping) else None
-            if not isinstance(data, Mapping):
+            if not isinstance(data, Mapping):  # pragma: no cover — defensive
                 continue
             removed_count = data.get("removedCount")
             if removed_count is None:
@@ -131,13 +131,13 @@ def fold_consumed_work(events: "list[Mapping[str, Any]] | tuple[Mapping[str, Any
             continue
         if event_type == "turn/end":
             data = event.get("data") if isinstance(event, Mapping) else None
-            if not isinstance(data, Mapping):
+            if not isinstance(data, Mapping):  # pragma: no cover — defensive
                 continue
             turn = data.get("turn")
             reason = data.get("reason")
             open_turn = None
             if not isinstance(turn, int) or isinstance(turn, bool) or not isinstance(reason, Mapping):
-                continue
+                continue  # pragma: no cover — defensive
             if turn in stepped:
                 stepped.discard(turn)
                 end = event

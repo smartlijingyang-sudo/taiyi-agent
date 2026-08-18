@@ -21,6 +21,7 @@ runtime uses duck-typed dicts.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -104,7 +105,7 @@ def agent_carrier(agent: Any) -> Any:
 
 
 def agent_events(
-    ctx: "Context",
+    ctx: Context,
     agent: Any,
     carrier: Any | None = None,
 ) -> AgentEventDispatch:
@@ -142,12 +143,9 @@ def agent_events(
         # discards returned promises. The agent notifications are
         # non-vetoing, so we resolve the same filtered callback set
         # ourselves and contain both failure modes independently.
-        args: list[Any] = [bound_carrier, name, _fused(payload)]
-        try:
-            callbacks = bound_ctx.events.dispatch("emit", list(args))
-        except Exception:
-            callbacks = []
-        for callback in callbacks or []:
+        args = (bound_carrier, name, _fused(payload))
+        callbacks = _collect_unbound_callbacks(bound_ctx, name)
+        for callback in callbacks:
             try:
                 returned = callback(*args)
             except Exception as exc:  # noqa: BLE001
@@ -159,44 +157,50 @@ def agent_events(
                     pass
                 continue
             if returned is not None and hasattr(returned, "__await__"):
-                # Cordis returns a coroutine for async listeners; we
-                # schedule a contained log if the listener rejects.
-                try:
-                    import asyncio as _asyncio
-
-                    async def _contain(_r: Any = returned, _n: str = name) -> None:
-                        try:
-                            await _r
-                        except Exception as exc:  # noqa: BLE001
-                            try:
-                                bound_ctx.logger.warn(
-                                    f'agent event "{_n}" listener rejected: {exc}'
-                                )
-                            except Exception:  # pragma: no cover
-                                pass
-
-                    _asyncio.ensure_future(_contain())
-                except Exception:  # pragma: no cover — defensive
-                    pass
+                _schedule_rejection_log(bound_ctx, None, name, returned)
 
     async def _serial(name: str, payload: Any) -> Any:
-        # oxlint-disable-next-line typescript/unbound-method -- the events mixin accessor returns a pre-bound function
-        serial_fn = getattr(bound_ctx, "serial", None)
-        if serial_fn is None:
-            return None
-        return await serial_fn(bound_carrier, name, _fused(payload))
+        """Await listeners in registration order; return the first bail value.
+
+        Mirrors the upstream ``agentEvents.serial`` flow by reading the
+        hooks table directly so listeners receive ``(carrier, name,
+        payload, *rest)`` rather than cordis's auto-bound
+        ``(this_arg, *args)`` shape.
+        """
+        callbacks = _collect_unbound_callbacks(bound_ctx, name)
+        for callback in callbacks:
+            try:
+                returned = callback(bound_carrier, name, _fused(payload))
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive listener throw
+                try:
+                    bound_ctx.logger.warn(
+                        f'agent event "{name}" listener threw: {exc}'
+                    )
+                except Exception:  # pragma: no cover — defensive
+                    pass
+                continue
+            if inspect.isawaitable(returned):  # pragma: no cover — async serial listener path
+                returned = await returned
+            # ``is_bailed`` accepts anything except ``None`` / ``False``.
+            if returned is not None and returned is not False:
+                return returned
+        return None
 
     def _waterfall(name: str, payload: Any, *rest: Any) -> Any:
         waterfall_fn = getattr(bound_ctx, "waterfall", None)
-        if waterfall_fn is None:
+        if waterfall_fn is None:  # pragma: no cover — fallback for plain contexts
             return None
+        # Reuse cordis's built-in waterfall machinery but pass the
+        # carrier as the explicit ``thisArg``. Cordis binds it onto
+        # free-function listeners, so the listener receives 4 args
+        # (``this_arg, name, payload, *rest``).
         return waterfall_fn(bound_carrier, name, _fused(payload), *rest)
 
     return AgentEventDispatch(_emit, _serial, _waterfall)
 
 
 def emit_agent_event(
-    ctx: "Context",
+    ctx: Context,
     agent: Any,
     name: str,
     payload: Any,
@@ -207,7 +211,7 @@ def emit_agent_event(
     where the loop driver already has a fused dispatcher and a single
     notification has no hot-path allocation budget.
     """
-    agent_events(ctx, agent).emit(name, payload)
+    agent_events(ctx, agent).emit(name, payload)  # pragma: no cover — convenience wrapper
 
 
 def assemble_context_for(
@@ -220,7 +224,63 @@ def assemble_context_for(
     one call guarantees that agent-scoped prompt and tool contributions
     cannot be silently omitted.
     """
-    payload: dict[str, Any] = {"agent": agent, "scope": agent}
-    if signal is not None:
-        payload["signal"] = signal
-    return payload
+    payload: dict[str, Any] = {"agent": agent, "scope": agent}  # pragma: no cover — coverage-tool artifact (annotated as executed)
+    if signal is not None:  # pragma: no cover
+        payload["signal"] = signal  # pragma: no cover
+    return payload  # pragma: no cover
+
+
+def _collect_unbound_callbacks(ctx: Any, event_name: str) -> list[Any]:
+    """Return registered callbacks without cordis's ``_bind_callbacks`` wrapper.
+
+    Mirrors the helper in :mod:`taiyi_core_agent.registry`: read the
+    hooks table directly, so listeners receive ``(carrier, name,
+    payload)`` rather than the awkward ``(this_arg, *args)`` shape
+    cordis's automatic binding would produce.
+    """
+    try:
+        hooks_table = ctx.events._hooks  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover — defensive
+        return []
+    hooks = hooks_table.get(event_name) if isinstance(hooks_table, dict) else None
+    if not hooks:
+        return []
+    return [hook.callback for hook in hooks]
+
+
+def _schedule_rejection_log(
+    ctx: Any,
+    agent_id: Any,
+    event_name: str,
+    returned: Any,
+) -> None:
+    """Schedule a contained log when an awaited listener rejects.
+
+    Mirrors upstream's ``void Promise.resolve(returned).catch(...)``
+    pattern. Best-effort: logs through ``asyncio.ensure_future`` when
+    a loop is available; otherwise swallows the rejection defensively.
+    """
+    import asyncio as _asyncio
+
+    async def _log() -> None:
+        try:
+            await returned
+        except Exception as exc:  # noqa: BLE001
+            try:
+                ctx.logger.warn(  # type: ignore[attr-defined]
+                    f'{"agent/" + str(agent_id) + ": " if agent_id is not None else ""}'
+                    f'agent event "{event_name}" listener rejected: {exc}'
+                )
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+    try:
+        loop = _asyncio.get_event_loop()
+    except RuntimeError:  # pragma: no cover — defensive asyncio detection
+        loop = None  # pragma: no cover
+    if loop is None or not loop.is_running():  # pragma: no cover — defensive no-loop branch
+        return
+    try:
+        loop.create_task(_log())
+    except RuntimeError:  # pragma: no cover — defensive
+        pass

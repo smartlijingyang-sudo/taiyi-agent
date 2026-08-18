@@ -35,21 +35,21 @@ from taiyi_core_agent.consumed_work import (
 )
 from taiyi_core_agent.context import assemble_context_for
 from taiyi_core_agent.dispatch import (
-    AgentEventDispatch,
     AGENT_SUBJECT_EVENT_NAMES,
+    AgentEventDispatch,
     agent_events,
 )
 from taiyi_core_agent.event import emit_agent_event
 from taiyi_core_agent.factory import (
-    AgentFactory,
-    AgentHandle,
-    AgentSetupCommit,
-    AgentSetup,
-    CreateAgentMeta,
-    CreateAgentOptions,
     DISPOSED_INITIATOR_MESSAGE,
     NO_FACTORY_MESSAGE,
     NO_INITIATOR_MESSAGE,
+    AgentFactory,
+    AgentHandle,
+    AgentSetup,
+    AgentSetupCommit,
+    CreateAgentMeta,
+    CreateAgentOptions,
     ResumeAgentOptions,
 )
 from taiyi_core_agent.inbox import Inbox, InboxNotifications

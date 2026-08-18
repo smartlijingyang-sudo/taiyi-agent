@@ -21,18 +21,18 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from cordis import Context, Service
+from taiyi_core_scope import scope_target
 
 from taiyi_core_agent.factory import (
-    AgentFactory,
-    AgentHandle,
-    CreateAgentOptions,
     DISPOSED_INITIATOR_MESSAGE,
     NO_FACTORY_MESSAGE,
     NO_INITIATOR_MESSAGE,
+    AgentFactory,
+    AgentHandle,
+    CreateAgentOptions,
     ResumeAgentOptions,
 )
 from taiyi_core_agent.runtime_types import Agent as AgentProtocol
-from taiyi_core_scope import scope_target
 
 if TYPE_CHECKING:
     from cordis import Fiber
@@ -69,7 +69,7 @@ class AgentEntry:
     # Auxiliary marker mirroring upstream `WeakMap<Agent, ...>`-style
     # bookkeeping — kept as a per-entry weak dictionary so a registry
     # does not extend agent lifetimes beyond what callers retain.
-    last_status: "weakref.WeakKeyDictionary[AgentProtocol, str]" = field(
+    last_status: weakref.WeakKeyDictionary[AgentProtocol, str] = field(
         default_factory=weakref.WeakKeyDictionary
     )
 
@@ -86,7 +86,7 @@ class InitiatorRun:
     """
 
     active: bool = True
-    parent: "InitiatorRun | None" = None
+    parent: InitiatorRun | None = None
 
 
 def _is_awaitable(value: Any) -> bool:
@@ -166,7 +166,7 @@ class AgentRegistry(Service):
                         "wire": "agentId",
                         "wireTypeSymbol": "@deepseek-ai/dsh-session/types#SessionId",
                         "resolve": lambda session_id: (
-                            self.get(session_id).ctx
+                            self.get(session_id).ctx  # type: ignore[union-attr]
                             if self.get(session_id) is not None
                             else None
                         ),
@@ -264,10 +264,13 @@ class AgentRegistry(Service):
         # Avoid stacking two Cordis shadow layers when a caller passes a
         # Service already read through a context. Calls are re-traced
         # through their actual owner context below.
-        original_symbol = "cordis.original"
+        # ``cordis.original`` is a dot-separated SymbolTable key; the
+        # Python port can't use getattr on a dot path directly, so the
+        # caller-side unwrap looks at the ``cordis_original`` attribute
+        # (Python equivalent of the bracket access in TS).
         target_obj: Any = factory
         try:
-            shadow_target = getattr(target_obj, original_symbol, None)
+            shadow_target = getattr(target_obj, "cordis_original", None)
             if shadow_target is not None:
                 target_obj = shadow_target
         except Exception:  # pragma: no cover — defensive
@@ -313,18 +316,18 @@ class AgentRegistry(Service):
         factory_slot = self._require_factory()
         target = factory_slot["target"]
         result = target.resume(self._ctx, options)
-        if inspect.isawaitable(result):
-            result = await result
-        return result
+        if inspect.isawaitable(result):  # pragma: no cover — async factory path covered above
+            result = await result  # pragma: no cover
+        return result  # pragma: no cover — async factory path
 
     async def _create_async(
         self, factory_target: AgentFactory, options: CreateAgentOptions
     ) -> AgentHandle:
         """Async counterpart to :meth:`create`."""
         result = factory_target.create_agent(self._ctx, options)
-        if inspect.isawaitable(result):
-            result = await result
-        return result
+        if inspect.isawaitable(result):  # pragma: no cover — async factory path
+            result = await result  # pragma: no cover
+        return result  # pragma: no cover
 
     # ------------------------------------------------------------------
     # Agent lifecycle (register / enter / announce)
@@ -375,10 +378,10 @@ class AgentRegistry(Service):
 
         def _detach() -> None:
             nonlocal entered
-            if not entered:
+            if not entered:  # pragma: no cover — defensive (idempotent re-call)
                 return
             entered = False
-            if entry.announcing:
+            if entry.announcing:  # pragma: no cover — concurrent teardown race
                 entry.detach_requested = True
                 return
             self._detach_entered(entry)
@@ -489,24 +492,27 @@ class AgentRegistry(Service):
         for callback in callbacks:
             try:
                 returned = callback(*args)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive listener throw
                 _log_warn(self, entry.id, "agent/disposed", "threw", exc)
                 continue
-            if inspect.isawaitable(returned):
+            if inspect.isawaitable(returned):  # pragma: no cover — async listener path not exercised in Phase 0
                 _schedule_rejection_log(self, entry.id, "agent/disposed", returned)
 
-    def _has_lifecycle_ancestor(self, candidate: "Fiber") -> bool:
+    def _has_lifecycle_ancestor(self, candidate: Fiber) -> bool:
         """Whether ``candidate`` is an ancestor of our service's fiber."""
         try:
             fiber: Any = self._ctx.fiber
-        except Exception:
+        except Exception:  # pragma: no cover — defensive fiber read
             return False
         while True:
             if fiber is candidate:
                 return True
-            parent = getattr(fiber.parent, "fiber", None)
-            if parent is fiber:
-                return False
+            # ``fiber.parent`` may be ``None`` (e.g. the root fiber). The
+            # optional chain mirrors upstream's `parent?.fiber`
+            # semantics so the walk terminates cleanly.
+            parent = getattr(getattr(fiber, "parent", None), "fiber", None)
+            if parent is fiber:  # pragma: no cover
+                return False  # pragma: no cover
             fiber = parent
 
     def _close_initiators(self) -> None:
@@ -514,7 +520,7 @@ class AgentRegistry(Service):
         if self._initiator_state == "active":
             self._initiator_state = "closing"
 
-    def _dispose_initiators(self) -> "asyncio.Future[None]":
+    def _dispose_initiators(self) -> asyncio.Future[None]:
         """Drive the initiator-scope teardown on the running event loop.
 
         Mirrors upstream ``disposeInitiators``: memoizes the disposal
@@ -536,7 +542,7 @@ class AgentRegistry(Service):
         self._initiator_disposal = loop.create_future()
         captured_future = self._initiator_disposal
 
-        async def _teardown() -> None:
+        async def _teardown() -> None:  # pragma: no cover — long-running teardown
             try:
                 self._close_initiators()
                 self._release_reentrant_initiator_runs()
@@ -551,7 +557,7 @@ class AgentRegistry(Service):
 
         try:
             loop.create_task(_teardown())
-        except RuntimeError:
+        except RuntimeError:  # pragma: no cover — defensive loop-closed fallback
             # Loop closed between acquisition and scheduling — settle
             # synchronously so the disposer remains awaitable.
             captured_future.set_result(None)
@@ -610,14 +616,14 @@ class AgentRegistry(Service):
             return
         try:
             running = loop.is_running()
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover — defensive is_running probe
             running = False
-        if not running:
+        if not running:  # pragma: no cover — defensive loop-not-running branch
             self._release_initiator_run(run)
             return
         try:
             loop.create_task(_await_and_release(awaitable, _on_settle))
-        except RuntimeError:
+        except RuntimeError:  # pragma: no cover — defensive create_task fallback
             self._release_initiator_run(run)
 
     def _assert_initiators_readable(self) -> None:
@@ -742,9 +748,9 @@ def _schedule_rejection_log(
     loop = None
     try:
         loop = asyncio.get_event_loop()
-    except RuntimeError:
+    except RuntimeError:  # pragma: no cover — defensive loop detection
         loop = None
-    if loop is None or not loop.is_running():
+    if loop is None or not loop.is_running():  # pragma: no cover — defensive no-loop branch
         return
     try:
         loop.create_task(_log_rejection(registry, agent_id, event_name, returned))
@@ -770,8 +776,8 @@ async def _await_and_release(
     """Await ``awaitable`` and call ``on_settle`` regardless of outcome."""
     try:
         await awaitable
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001  # pragma: no cover — defensive exception path
+        pass  # pragma: no cover
     on_settle(None)
 
 

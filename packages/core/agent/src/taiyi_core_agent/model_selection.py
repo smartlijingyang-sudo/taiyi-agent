@@ -30,7 +30,7 @@ class ModelSelection:
 
     provider: str
     model: str
-    reasoningEffort: str | None = None
+    reasoningEffort: str | None = None  # noqa: N815 — upstream camelCase contract
 
 
 @dataclass
@@ -71,6 +71,24 @@ def install_model_selection(
 # ---------------------------------------------------------------------------
 
 
+def _extract_nxt(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Callable[[], Any]:
+    """Read the ``next`` callback from a cordis waterfall invocation.
+
+    cordis binds the listener to the active context as the first
+    positional argument; the ``next`` callback is delivered either as a
+    trailing positional callable or as the ``nxt`` keyword. This helper
+    detects both shapes and returns a no-op when none is present so
+    callers can guard against test contexts that don't drive a full
+    waterfall.
+    """
+    nxt: Callable[[], Any] | None = kwargs.get("nxt")
+    if nxt is not None:
+        return nxt
+    if args and callable(args[-1]):  # pragma: no cover — defensive positional fallback
+        return args[-1]
+    return lambda: None  # pragma: no cover — defensive no-nxt fallback
+
+
 def _register_assembly_listener(
     agent_ctx: Context,
     selection: ModelSelectionRef,
@@ -82,7 +100,8 @@ def _register_assembly_listener(
     produced by this step.
     """
 
-    async def _assemble_listener(_assembly: Any, _context: Any, nxt: Callable[[], Any]) -> Any:
+    async def _assemble_listener(*args: Any, **kwargs: Any) -> Any:
+        nxt = _extract_nxt(args, kwargs)
         selected = selection.current
         assembled = await nxt()
         selection.assembled = selected
@@ -98,8 +117,6 @@ def _register_assembly_listener(
             merged = dict(assembled)
             merged["variables"] = variables
             return merged
-        # Defensive: attach as a best-effort attribute when the assembly
-        # is not a plain dict (consumer projects may pass another type).
         try:
             assembled.variables = variables  # type: ignore[attr-defined]
             return assembled
@@ -123,7 +140,8 @@ def _register_request_listener(
     inherited reasoning effort, restoring provider defaults.
     """
 
-    async def _request_listener(_payload: Any, nxt: Callable[[], Any]) -> Any:
+    async def _request_listener(*args: Any, **kwargs: Any) -> Any:
+        nxt = _extract_nxt(args, kwargs)
         resolved = await nxt()
         selected = selection.assembled
         if selected is None:
